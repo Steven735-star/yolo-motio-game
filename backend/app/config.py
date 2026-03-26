@@ -1,0 +1,3 @@
+MODEL_PATH = "yolo11n-pose.pt"
+CONF_THRESHOLD = 0.5
+IMG_SIZE = 640
