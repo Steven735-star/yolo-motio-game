@@ -1,20 +1,14 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL_SHARD_1 = "postgresql://yolo_user:yolo_pass@localhost:5433/yolo_motion_game"
-DATABASE_URL_SHARD_2 = "postgresql://yolo_user:yolo_pass@localhost:5434/yolo_motion_game"
+DATABASE_URL = "postgresql://yolo:yolo@localhost:5432/yolo_game"
 
-engine_shard_1 = create_engine(DATABASE_URL_SHARD_1, echo=False)
-engine_shard_2 = create_engine(DATABASE_URL_SHARD_2, echo=False)
+engine = create_engine(DATABASE_URL)
 
-SessionLocalShard1 = sessionmaker(
+SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
-    bind=engine_shard_1
+    bind=engine
 )
 
-SessionLocalShard2 = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine_shard_2
-)
+Base = declarative_base()

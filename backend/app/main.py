@@ -1,218 +1,500 @@
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import time
+from pydantic import ValidationError
 
-from app.services.db_service import (
-    create_session,
-    update_session_calibration,
-    close_session,
-    get_session_shard,
+from app.config import get_settings
+from app.core.manager import ConnectionManager
+from app.models.schemas import (
+    CalibrationFrameMessage,
+    ChallengeType,
+    ClientEventType,
+    JoinMessage,
+    LeaveMessage,
+    MatchSnapshot,
+    PingMessage,
+    PlayerFrameMessage,
+    ReadyMessage,
+    ServerEvent,
+    StartMatchMessage,
 )
-from app.services.game_service import next_state, get_state_duration
-from app.services.pose_service import PoseService
-from app.services.movement_service import (
-    compute_movement,
-    smooth_movement,
-    classify_state,
-)
-from app.utils.image_decode import decode_base64_image
+from app.services.game_service import GameCoordinator
+from app.services.metrics_service import MetricsService
+from app.services.object_worker import ObjectWorker
+from app.services.pose_worker import PoseWorker
+from app.services.router_service import TaskRouter
+from app.utils.image_decode import ImageDecodeError, decode_base64_image, resize_for_inference
 
-app = FastAPI()
-pose_service = PoseService()
-
-session_state = {}
-
-CALIBRATION_SECONDS = 5
-ALPHA = 1.5
-MIN_VALID_CALIBRATION_FRAMES = 20
-
+settings = get_settings()
+app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+manager = ConnectionManager()
+game = GameCoordinator(settings)
+pose_worker = PoseWorker(settings)
+object_worker = ObjectWorker(settings)
+router = TaskRouter(pose_worker=pose_worker, object_worker=object_worker)
+metrics = MetricsService()
+
+last_frame_seen: dict[tuple[str, str], float] = {}
+calibration_stability: dict[tuple[str, str], int] = {}
+last_player_seen: dict[tuple[str, str], float] = {}
+
+persisted_matches: set[str] = set()
+persisted_players: set[tuple[str, str]] = set()
+persisted_rounds: set[tuple[str, int]] = set()
+finished_matches: set[str] = set()
+
+PLAYER_TTL_SECONDS = 8.0
+
 
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "detect_model": settings.detect_model,
+        "pose_model": settings.pose_model,
+        "ts": time.time(),
+    }
 
 
-@app.websocket("/ws/pose")
-async def websocket_pose(websocket: WebSocket):
-    await websocket.accept()
-    session_id = None
+@app.get("/matches/{match_id}")
+def get_match(match_id: str) -> dict[str, Any]:
+    _prune_stale_players(match_id)
+    snapshot = game.tick(match_id)
+    _sync_snapshot_to_metrics(snapshot)
+    return snapshot.model_dump()
+
+
+@app.websocket("/ws/{match_id}")
+async def websocket_match(websocket: WebSocket, match_id: str) -> None:
+    current_player_id: str | None = None
 
     try:
+        await manager.connect(match_id, websocket)
+
+        await manager.send(
+            websocket,
+            ServerEvent(
+                event="connected",
+                data={"matchId": match_id, "serverTime": time.time()},
+            ),
+        )
+
         while True:
-            message = await websocket.receive_json()
+            raw = await websocket.receive_text()
 
-            frame_data = message.get("frame")
-            session_id = message.get("sessionId", "unknown")
-
-            if session_id not in session_state:
-                session_state[session_id] = {
-                    "previous_keypoints": None,
-                    "smoothed_movement": None,
-                    "phase": "CALIBRATING",
-                    "calibration_start": time.time(),
-                    "calibration_values": [],
-                    "baseline": None,
-                    "threshold": None,
-                    "calibration_status": "IN_PROGRESS",
-                    "game_state": "WAIT",
-                    "state_start_time": time.time(),
-                    "state_duration": 3.0,
-                }
-                create_session(session_id)
-
-            state_data = session_state[session_id]
-
-            if not frame_data:
-                await websocket.send_json({
-                    "detected": False,
-                    "error": "No frame provided",
-                    "sessionId": session_id,
-                    "db_shard": get_session_shard(session_id),
-                })
-                continue
-
-            frame = decode_base64_image(frame_data)
-
-            if frame is None:
-                await websocket.send_json({
-                    "detected": False,
-                    "error": "Invalid image",
-                    "sessionId": session_id,
-                    "db_shard": get_session_shard(session_id),
-                })
-                continue
-
-            result = pose_service.infer(frame)
-
-            previous_keypoints = state_data["previous_keypoints"]
-            raw_movement = compute_movement(previous_keypoints, result["keypoints"])
-
-            smoothed_movement = smooth_movement(
-                raw_movement,
-                state_data["smoothed_movement"],
-                alpha=0.35,
-            )
-
-            state_data["previous_keypoints"] = result["keypoints"]
-            state_data["smoothed_movement"] = smoothed_movement
-
-            now = time.time()
-            elapsed_calibration = now - state_data["calibration_start"]
-
-            # =========================
-            # FASE DE CALIBRACIÓN
-            # =========================
-            if state_data["phase"] == "CALIBRATING":
-                if smoothed_movement is not None:
-                    state_data["calibration_values"].append(smoothed_movement)
-
-                if elapsed_calibration >= CALIBRATION_SECONDS:
-                    values = state_data["calibration_values"]
-                    total_frames = len(values)
-
-                    if total_frames >= MIN_VALID_CALIBRATION_FRAMES:
-                        baseline = sum(values) / len(values)
-                        threshold = baseline * ALPHA
-
-                        state_data["baseline"] = baseline
-                        state_data["threshold"] = threshold
-                        state_data["phase"] = "PLAYING"
-                        state_data["calibration_status"] = "OK"
-
-                        update_session_calibration(
-                            session_id=session_id,
-                            calibration_status="OK",
-                            baseline=baseline,
-                            threshold=threshold,
-                        )
-
-                        state_data["game_state"] = "WAIT"
-                        state_data["state_start_time"] = now
-                        state_data["state_duration"] = get_state_duration("WAIT")
-                    else:
-                        state_data["calibration_start"] = time.time()
-                        state_data["calibration_values"] = []
-                        state_data["baseline"] = None
-                        state_data["threshold"] = None
-                        state_data["calibration_status"] = "RETRYING"
-
-                        update_session_calibration(
-                            session_id=session_id,
-                            calibration_status="RETRYING",
-                            baseline=None,
-                            threshold=None,
-                        )
-
-                result["movement"] = smoothed_movement
-                result["baseline"] = state_data["baseline"]
-                result["threshold"] = state_data["threshold"]
-                result["state"] = "CALIBRANDO"
-                result["game_phase"] = state_data["phase"]
-                result["game_state"] = state_data["game_state"]
-                result["state_time"] = 0.0
-                result["state_duration"] = state_data["state_duration"]
-                result["calibration_progress"] = min(
-                    elapsed_calibration / CALIBRATION_SECONDS, 1.0
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                await manager.send(
+                    websocket,
+                    ServerEvent(event="error", ok=False, message="JSON inválido."),
                 )
-                result["calibration_status"] = state_data["calibration_status"]
-                result["valid_calibration_frames"] = len(state_data["calibration_values"])
-                result["required_calibration_frames"] = MIN_VALID_CALIBRATION_FRAMES
-                result["sessionId"] = session_id
-                result["db_shard"] = get_session_shard(session_id)
-
-                await websocket.send_json(result)
                 continue
 
-            # =========================
-            # FASE DE JUEGO
-            # =========================
-            threshold = state_data["threshold"]
-            player_state = classify_state(smoothed_movement, threshold)
+            event_type = payload.get("type")
+            if not event_type:
+                await manager.send(
+                    websocket,
+                    ServerEvent(event="error", ok=False, message="Falta el campo 'type'."),
+                )
+                continue
 
-            current_game_state = state_data["game_state"]
-            elapsed_state = now - state_data["state_start_time"]
+            try:
+                if event_type == ClientEventType.join:
+                    msg = JoinMessage(**payload)
+                    _ensure_same_match(msg.matchId, match_id)
+                    current_player_id = msg.playerId
+                    _mark_seen(msg.matchId, msg.playerId)
 
-            if elapsed_state >= state_data["state_duration"]:
-                new_state = next_state(current_game_state)
-                state_data["game_state"] = new_state
-                state_data["state_start_time"] = now
-                state_data["state_duration"] = get_state_duration(new_state)
+                    snapshot = game.join_player(msg.matchId, msg.playerId, msg.displayName)
 
-                current_game_state = new_state
-                elapsed_state = 0.0
+                    _safe_save_player(
+                        match_id=msg.matchId,
+                        player_id=msg.playerId,
+                        display_name=msg.displayName or msg.playerId,
+                    )
 
-            result["movement"] = smoothed_movement
-            result["baseline"] = state_data["baseline"]
-            result["threshold"] = threshold
-            result["state"] = player_state
-            result["game_phase"] = state_data["phase"]
-            result["game_state"] = state_data["game_state"]
-            result["state_time"] = elapsed_state
-            result["state_duration"] = state_data["state_duration"]
-            result["calibration_progress"] = 1.0
-            result["calibration_status"] = state_data["calibration_status"]
-            result["valid_calibration_frames"] = len(state_data["calibration_values"])
-            result["required_calibration_frames"] = MIN_VALID_CALIBRATION_FRAMES
-            result["sessionId"] = session_id
-            result["db_shard"] = get_session_shard(session_id)
+                    _sync_snapshot_to_metrics(snapshot)
 
-            await websocket.send_json(result)
+                    await manager.broadcast(
+                        msg.matchId,
+                        ServerEvent(event="match_state", data=snapshot.model_dump()),
+                    )
+                    continue
 
-    except WebSocketDisconnect:
+                if event_type == ClientEventType.ready:
+                    msg = ReadyMessage(**payload)
+                    _ensure_same_match(msg.matchId, match_id)
+                    current_player_id = msg.playerId
+                    _mark_seen(msg.matchId, msg.playerId)
+
+                    snapshot = game.set_ready(msg.matchId, msg.playerId, msg.ready)
+                    _sync_snapshot_to_metrics(snapshot)
+
+                    await manager.broadcast(
+                        msg.matchId,
+                        ServerEvent(event="match_state", data=snapshot.model_dump()),
+                    )
+                    continue
+
+                if event_type == ClientEventType.start_match:
+                    msg = StartMatchMessage(**payload)
+                    _ensure_same_match(msg.matchId, match_id)
+                    if msg.playerId:
+                        current_player_id = msg.playerId
+                        _mark_seen(msg.matchId, msg.playerId)
+
+                    snapshot = game.start_match(msg.matchId)
+
+                    _safe_create_match(msg.matchId)
+                    _safe_save_round_from_snapshot(snapshot)
+                    _sync_snapshot_to_metrics(snapshot)
+
+                    await manager.broadcast(
+                        msg.matchId,
+                        ServerEvent(event="match_started", data=snapshot.model_dump()),
+                    )
+                    continue
+
+                if event_type == ClientEventType.leave:
+                    msg = LeaveMessage(**payload)
+                    _ensure_same_match(msg.matchId, match_id)
+
+                    snapshot = game.remove_player(msg.matchId, msg.playerId)
+                    _remove_seen(msg.matchId, msg.playerId)
+
+                    if snapshot is not None:
+                        _sync_snapshot_to_metrics(snapshot)
+                        await manager.broadcast(
+                            msg.matchId,
+                            ServerEvent(event="match_state", data=snapshot.model_dump()),
+                        )
+                    else:
+                        await manager.send(
+                            websocket,
+                            ServerEvent(
+                                event="left",
+                                data={"matchId": msg.matchId, "playerId": msg.playerId},
+                            ),
+                        )
+                    continue
+
+                if event_type == ClientEventType.ping:
+                    msg = PingMessage(**payload)
+                    if msg.matchId and msg.playerId:
+                        current_player_id = msg.playerId
+                        _mark_seen(msg.matchId, msg.playerId)
+
+                    if msg.matchId:
+                        _prune_stale_players(msg.matchId)
+                        snapshot = game.tick(msg.matchId)
+                        _safe_save_round_from_snapshot(snapshot)
+                        _sync_snapshot_to_metrics(snapshot)
+
+                        await manager.broadcast(
+                            msg.matchId,
+                            ServerEvent(event="match_state", data=snapshot.model_dump()),
+                        )
+
+                    await manager.send(
+                        websocket,
+                        ServerEvent(event="pong", data={"matchId": msg.matchId, "ts": time.time()}),
+                    )
+                    continue
+
+                if event_type == ClientEventType.calibration_frame:
+                    msg = CalibrationFrameMessage(**payload)
+                    _ensure_same_match(msg.matchId, match_id)
+                    current_player_id = msg.playerId
+                    _mark_seen(msg.matchId, msg.playerId)
+
+                    try:
+                        image = decode_base64_image(
+                            msg.frame,
+                            max_chars=settings.max_frame_base64_chars,
+                        )
+                        image, _ = resize_for_inference(
+                            image,
+                            max_side=settings.max_inference_side,
+                        )
+                    except ImageDecodeError as exc:
+                        await manager.send(
+                            websocket,
+                            ServerEvent(event="error", ok=False, message=str(exc)),
+                        )
+                        continue
+
+                    result = pose_worker.analyze_calibration(image)
+
+                    key = (msg.matchId, msg.playerId)
+                    if result["ready"]:
+                        calibration_stability[key] = calibration_stability.get(key, 0) + 1
+                    else:
+                        calibration_stability[key] = 0
+
+                    stable_frames = calibration_stability[key]
+                    final_ready = stable_frames >= 4
+
+                    await manager.send(
+                        websocket,
+                        ServerEvent(
+                            event="calibration_result",
+                            data={
+                                "playerId": msg.playerId,
+                                "detected": result["detected"],
+                                "confidence": result["confidence"],
+                                "keypointsVisible": result["keypointsVisible"],
+                                "stableFrames": stable_frames,
+                                "ready": final_ready,
+                                "keypoints": result["keypoints"],
+                            },
+                        ),
+                    )
+                    continue
+
+                if event_type == ClientEventType.frame:
+                    msg = PlayerFrameMessage(**payload)
+                    _ensure_same_match(msg.matchId, match_id)
+                    current_player_id = msg.playerId
+                    _mark_seen(msg.matchId, msg.playerId)
+
+                    _prune_stale_players(msg.matchId)
+                    snapshot = game.tick(msg.matchId)
+                    _safe_save_round_from_snapshot(snapshot)
+                    _sync_snapshot_to_metrics(snapshot)
+
+                    if snapshot.status.value != "in_progress" or not snapshot.round.active:
+                        await manager.send(
+                            websocket,
+                            ServerEvent(
+                                event="ignored_frame",
+                                ok=False,
+                                message="No hay una ronda activa para procesar frames.",
+                                data=snapshot.model_dump(),
+                            ),
+                        )
+                        continue
+
+                    if _should_throttle(msg.matchId, msg.playerId):
+                        continue
+
+                    try:
+                        image = decode_base64_image(
+                            msg.frame,
+                            max_chars=settings.max_frame_base64_chars,
+                        )
+                        image, _ = resize_for_inference(
+                            image,
+                            max_side=settings.max_inference_side,
+                        )
+                    except ImageDecodeError as exc:
+                        await manager.send(
+                            websocket,
+                            ServerEvent(event="error", ok=False, message=str(exc)),
+                        )
+                        continue
+
+                    challenge = game.current_or_new_challenge(msg.matchId)
+                    challenge_type = msg.challengeType or challenge.challengeType
+                    target = msg.target or challenge.target
+
+                    result = router.process(
+                        challenge_type=ChallengeType(challenge_type),
+                        frame=image,
+                        target=target,
+                    )
+
+                    _safe_save_attempt(
+                        match_id=msg.matchId,
+                        player_id=msg.playerId,
+                        matched=result.matched,
+                        confidence=result.confidence,
+                    )
+
+                    snapshot = game.register_attempt(msg.matchId, msg.playerId, result)
+                    _sync_snapshot_to_metrics(snapshot)
+
+                    await manager.broadcast(
+                        msg.matchId,
+                        ServerEvent(
+                            event="frame_result",
+                            data={
+                                "playerId": msg.playerId,
+                                "workerResult": result.model_dump(),
+                                "match": snapshot.model_dump(),
+                            },
+                        ),
+                    )
+
+                    snapshot = game.tick(msg.matchId)
+                    _safe_save_round_from_snapshot(snapshot)
+                    _sync_snapshot_to_metrics(snapshot)
+
+                    await manager.broadcast(
+                        msg.matchId,
+                        ServerEvent(event="match_state", data=snapshot.model_dump()),
+                    )
+                    continue
+
+                await manager.send(
+                    websocket,
+                    ServerEvent(
+                        event="error",
+                        ok=False,
+                        message=f"Tipo de evento no soportado: {event_type}",
+                    ),
+                )
+
+            except ValidationError as exc:
+                await manager.send(
+                    websocket,
+                    ServerEvent(event="error", ok=False, message=f"Payload inválido: {exc}"),
+                )
+            except ValueError as exc:
+                await manager.send(
+                    websocket,
+                    ServerEvent(event="error", ok=False, message=str(exc)),
+                )
+            except Exception as exc:
+                await manager.send(
+                    websocket,
+                    ServerEvent(event="error", ok=False, message=f"Error interno: {exc}"),
+                )
+
+    except (WebSocketDisconnect, RuntimeError):
+        if current_player_id:
+            snapshot = game.disconnect_player(match_id, current_player_id)
+            if snapshot is not None:
+                _sync_snapshot_to_metrics(snapshot)
+                await manager.broadcast(
+                    match_id,
+                    ServerEvent(event="match_state", data=snapshot.model_dump()),
+                )
+    finally:
+        await manager.disconnect(match_id, websocket)
+
+
+def _mark_seen(match_id: str, player_id: str) -> None:
+    last_player_seen[(match_id, player_id)] = time.time()
+
+
+def _remove_seen(match_id: str, player_id: str) -> None:
+    last_player_seen.pop((match_id, player_id), None)
+
+
+def _prune_stale_players(match_id: str) -> None:
+    now = time.time()
+    stale_players = [
+        player_id
+        for (m_id, player_id), last_seen in list(last_player_seen.items())
+        if m_id == match_id and (now - last_seen) > PLAYER_TTL_SECONDS
+    ]
+
+    for player_id in stale_players:
+        snapshot = game.disconnect_player(match_id, player_id)
+        _remove_seen(match_id, player_id)
+        if snapshot is not None:
+            _sync_snapshot_to_metrics(snapshot)
+
+
+def _should_throttle(match_id: str, player_id: str) -> bool:
+    interval = 1.0 / max(settings.max_fps_per_player, 0.1)
+    now = time.time()
+    key = (match_id, player_id)
+    last = last_frame_seen.get(key)
+
+    if last is not None and (now - last) < interval:
+        return True
+
+    last_frame_seen[key] = now
+    return False
+
+
+def _ensure_same_match(payload_match_id: str, url_match_id: str) -> None:
+    if payload_match_id != url_match_id:
+        raise ValueError("El matchId del payload no coincide con la URL del WebSocket.")
+
+
+def _safe_create_match(match_id: str) -> None:
+    if match_id in persisted_matches:
+        return
+    try:
+        metrics.create_match(match_id)
+        persisted_matches.add(match_id)
+    except Exception:
+        pass
+
+
+def _safe_save_player(match_id: str, player_id: str, display_name: str) -> None:
+    key = (match_id, player_id)
+    if key in persisted_players:
+        return
+    try:
+        metrics.save_player(match_id, player_id, display_name)
+        persisted_players.add(key)
+    except Exception:
+        pass
+
+
+def _safe_save_round_from_snapshot(snapshot: MatchSnapshot) -> None:
+    round_state = snapshot.round
+    if round_state.roundNumber <= 0 or round_state.challenge is None:
+        return
+
+    key = (snapshot.matchId, round_state.roundNumber)
+    if key in persisted_rounds:
+        return
+
+    try:
+        metrics.save_round(
+            snapshot.matchId,
+            round_state.roundNumber,
+            round_state.challenge.challengeType.value,
+            round_state.challenge.target,
+        )
+        persisted_rounds.add(key)
+    except Exception:
+        pass
+
+
+def _safe_save_attempt(match_id: str, player_id: str, matched: bool, confidence: float) -> None:
+    try:
+        metrics.save_attempt(match_id, player_id, matched, confidence)
+    except Exception:
+        pass
+
+
+def _sync_snapshot_to_metrics(snapshot: MatchSnapshot) -> None:
+    _safe_create_match(snapshot.matchId)
+    _safe_save_round_from_snapshot(snapshot)
+
+    for player in snapshot.players:
+        _safe_save_player(
+            match_id=snapshot.matchId,
+            player_id=player.playerId,
+            display_name=player.displayName or player.playerId,
+        )
         try:
-            if session_id:
-                close_session(session_id)
-                if session_id in session_state:
-                    del session_state[session_id]
-        except Exception as e:
-            print("Error cerrando sesión en DB:", e)
+            metrics.update_score(snapshot.matchId, player.playerId, player.score)
+        except Exception:
+            pass
 
-        print("Cliente desconectado")
+    if snapshot.status.value == "finished" and snapshot.winnerPlayerId and snapshot.matchId not in finished_matches:
+        try:
+            metrics.finish_match(snapshot.matchId, snapshot.winnerPlayerId)
+            finished_matches.add(snapshot.matchId)
+        except Exception:
+            pass
