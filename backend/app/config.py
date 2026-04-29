@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     max_players_per_match: int = 5
     min_players_to_start: int = 2
     max_rounds: int = 5
-    round_timeout_seconds: int = 10
+    round_timeout_seconds: int = 6
     inter_round_delay_seconds: float = 1.5
 
     # Puntaje

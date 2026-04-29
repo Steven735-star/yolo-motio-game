@@ -1,15 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import logo from "./assets/logo.png";
 
-const WS_BASE = "ws://localhost:8000";
+const WS_BASE = "ws://192.168.68.128:8000";
 const DEFAULT_ROOM = "SALA-001";
+const GAME_NAME = "No le hagas caso a tu ex";
 
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "ROOM-";
-  for (let i = 0; i < 5; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
+  let code = "SALA-";
+  for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
   return code;
+}
+
+function cleanInstruction(text = "") {
+  return text
+    .replace(/^Simón dice:\s*/i, "")
+    .replace(/^Simon dice:\s*/i, "")
+    .trim();
+}
+
+function buildDisplayInstruction(challenge) {
+  if (!challenge) return "Esperando instrucción...";
+  const instruction = cleanInstruction(challenge.instruction || "");
+  if (challenge.isSimonSays) return instruction;
+  return `Tu ex dice: ${instruction}`;
 }
 
 export default function App() {
@@ -17,7 +31,7 @@ export default function App() {
   const [cameraStatus, setCameraStatus] = useState("idle");
   const [nickname, setNickname] = useState("");
   const [roomId, setRoomId] = useState(DEFAULT_ROOM);
-  const [roomMode, setRoomMode] = useState("join"); // join | create
+  const [roomMode, setRoomMode] = useState("join");
 
   const [wsStatus, setWsStatus] = useState("disconnected");
   const [matchState, setMatchState] = useState(null);
@@ -25,7 +39,6 @@ export default function App() {
   const [lastResult, setLastResult] = useState(null);
   const [joined, setJoined] = useState(false);
   const [readySent, setReadySent] = useState(false);
-  const [logMessages, setLogMessages] = useState([]);
 
   const [calibrationInfo, setCalibrationInfo] = useState({
     detected: false,
@@ -52,6 +65,9 @@ export default function App() {
   const frameIntervalRef = useRef(null);
   const calibrationIntervalRef = useRef(null);
 
+  const lastRoundProcessedRef = useRef(null);
+  const blockedFrameRoundRef = useRef(null);
+
   const currentMatchId = roomId.trim() || DEFAULT_ROOM;
 
   const navigateTo = (newScreen) => {
@@ -59,32 +75,20 @@ export default function App() {
     setScreen(newScreen);
   };
 
-  const addLog = (msg) => {
-    const now = new Date().toLocaleTimeString();
-    setLogMessages((prev) => [`[${now}] ${msg}`, ...prev].slice(0, 120));
-  };
-
   const showReconnectMessage = (msg, duration = 2500) => {
     setReconnectBanner(msg);
     window.clearTimeout(showReconnectMessage._t);
-    showReconnectMessage._t = window.setTimeout(() => {
-      setReconnectBanner("");
-    }, duration);
+    showReconnectMessage._t = window.setTimeout(() => setReconnectBanner(""), duration);
   };
 
   const showLobbyNotice = (msg, duration = 2600) => {
     setLobbyNotice(msg);
     window.clearTimeout(showLobbyNotice._t);
-    showLobbyNotice._t = window.setTimeout(() => {
-      setLobbyNotice("");
-    }, duration);
+    showLobbyNotice._t = window.setTimeout(() => setLobbyNotice(""), duration);
   };
 
   useEffect(() => {
-    const handlePop = (e) => {
-      const target = e.state?.screen || "landing";
-      setScreen(target);
-    };
+    const handlePop = (e) => setScreen(e.state?.screen || "landing");
     window.addEventListener("popstate", handlePop);
     history.replaceState({ screen: "landing" }, "", "#landing");
     return () => window.removeEventListener("popstate", handlePop);
@@ -93,7 +97,7 @@ export default function App() {
   useEffect(() => {
     const handleBeforeUnload = () => {
       try {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && nickname.trim()) {
+        if (wsRef.current?.readyState === WebSocket.OPEN && nickname.trim()) {
           wsRef.current.send(
             JSON.stringify({
               type: "leave",
@@ -114,7 +118,7 @@ export default function App() {
   useEffect(() => {
     let streamRef = null;
 
-    if (screen === "camera" || screen === "calibration" || screen === "game") {
+    if (["camera", "calibration", "game"].includes(screen)) {
       async function startCamera() {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
@@ -124,12 +128,10 @@ export default function App() {
           streamRef = stream;
           if (videoRef.current) videoRef.current.srcObject = stream;
           setCameraStatus("ready");
-          addLog("Cámara activada.");
         } catch (err) {
           console.error(err);
           setCameraStatus("error");
-          addLog("No se pudo activar la cámara.");
-          setScreen("landing");
+          showLobbyNotice("No se pudo activar la cámara. Revisa permisos o HTTPS.");
         }
       }
       startCamera();
@@ -144,10 +146,10 @@ export default function App() {
     const shouldHaveSocket =
       nickname.trim() &&
       currentMatchId &&
-      (screen === "lobby" || screen === "camera" || screen === "calibration" || screen === "game");
+      ["lobby", "camera", "calibration", "game"].includes(screen);
 
     if (!shouldHaveSocket) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const ws = new WebSocket(`${WS_BASE}/ws/${currentMatchId}`);
     wsRef.current = ws;
@@ -155,39 +157,29 @@ export default function App() {
 
     ws.onopen = () => {
       setWsStatus("connected");
-      addLog(`Servidor conectado para sala ${currentMatchId}.`);
-
       if (wasDisconnected && screen === "game") {
-        showReconnectMessage("Reconnected to ongoing match");
+        showReconnectMessage("Reconectado a la partida.");
         setWasDisconnected(false);
       }
     };
 
     ws.onclose = () => {
       setWsStatus("disconnected");
-      addLog("WebSocket cerrado.");
-
       if (screen === "game") {
         setWasDisconnected(true);
-        showReconnectMessage("Connection lost. Trying to recover...");
+        showReconnectMessage("Se perdió la conexión. Intentando recuperar...");
       }
     };
 
-    ws.onerror = () => {
-      addLog("Error en WebSocket.");
-    };
+    ws.onerror = () => showLobbyNotice("Error de conexión.");
 
     ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
-        handleServerEvent(data);
+        handleServerEvent(JSON.parse(event.data));
       } catch (err) {
         console.error(err);
-        addLog("Mensaje inválido del servidor.");
       }
     };
-
-    return () => {};
   }, [screen, nickname, currentMatchId, wasDisconnected]);
 
   useEffect(() => {
@@ -227,6 +219,8 @@ export default function App() {
       setReconnectBanner("");
       setWasDisconnected(false);
       setLobbyNotice("");
+      lastRoundProcessedRef.current = null;
+      blockedFrameRoundRef.current = null;
     }
   }, [screen, nickname, currentMatchId]);
 
@@ -239,12 +233,12 @@ export default function App() {
         displayName: nickname,
       });
       setJoined(true);
-      addLog(`Solicitud join enviada para ${nickname}.`);
     }
   }, [screen, wsStatus, nickname, joined, currentMatchId]);
 
   useEffect(() => {
     if (!wsRef.current || wsStatus !== "connected" || !nickname.trim()) return;
+
     const interval = setInterval(() => {
       sendWs({
         type: "ping",
@@ -252,6 +246,7 @@ export default function App() {
         playerId: nickname,
       });
     }, 2000);
+
     return () => clearInterval(interval);
   }, [wsStatus, nickname, screen, currentMatchId]);
 
@@ -263,9 +258,7 @@ export default function App() {
   }, [matchState?.status, screen]);
 
   useEffect(() => {
-    if (matchState?.status === "finished") {
-      setShowFinalOverlay(true);
-    }
+    if (matchState?.status === "finished") setShowFinalOverlay(true);
   }, [matchState?.status]);
 
   useEffect(() => {
@@ -274,27 +267,23 @@ export default function App() {
       return;
     }
 
-    if (!videoRef.current) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!videoRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
 
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
 
     calibrationIntervalRef.current = setInterval(() => {
-      if (!videoRef.current || !ctx) return;
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      if (!videoRef.current || !ctx || wsRef.current?.readyState !== WebSocket.OPEN) return;
 
       canvas.width = 320;
       canvas.height = 240;
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
-      const frame = canvas.toDataURL("image/jpeg", 0.65);
-
       sendWs({
         type: "calibration_frame",
         matchId: currentMatchId,
         playerId: nickname,
-        frame,
+        frame: canvas.toDataURL("image/jpeg", 0.65),
         timestamp: Date.now() / 1000,
       });
     }, 350);
@@ -308,8 +297,7 @@ export default function App() {
       return;
     }
 
-    if (!videoRef.current) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!videoRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
 
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
@@ -317,55 +305,51 @@ export default function App() {
     frameIntervalRef.current = setInterval(() => {
       if (!videoRef.current || !ctx) return;
       if (!matchState?.round?.active || !matchState?.round?.challenge) return;
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+      const roundNumber = matchState.round.roundNumber;
+
+      if (blockedFrameRoundRef.current === roundNumber) return;
 
       canvas.width = 320;
       canvas.height = 240;
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
-      const frame = canvas.toDataURL("image/jpeg", 0.65);
-
       sendWs({
         type: "frame",
         matchId: currentMatchId,
         playerId: nickname,
-        frame,
+        frame: canvas.toDataURL("image/jpeg", 0.65),
         challengeType: matchState.round.challenge.challengeType,
         target: matchState.round.challenge.target,
         timestamp: Date.now() / 1000,
       });
     }, 250);
 
-    addLog("Envío de frames iniciado a ~4 FPS.");
-
     return () => stopGameFrames();
-  }, [screen, matchState?.round?.active, matchState?.round?.challenge, nickname, currentMatchId]);
+  }, [
+    screen,
+    matchState?.round?.roundNumber,
+    matchState?.round?.active,
+    matchState?.round?.challenge,
+    nickname,
+    currentMatchId,
+  ]);
 
-  useEffect(() => {
-    drawOverlay();
-  }, [calibrationInfo, lastResult, screen]);
+  useEffect(() => drawOverlay(), [calibrationInfo, lastResult, screen]);
 
   useEffect(() => {
     if (screen !== "game") return;
+
     const disconnectedPlayers = players.filter((p) => !p.connected);
     if (disconnectedPlayers.length === 0) return;
 
-    const someoneElseDisconnected = disconnectedPlayers.some((p) => p.playerId !== nickname);
-    const iAmDisconnected = disconnectedPlayers.some((p) => p.playerId === nickname);
+    const names = disconnectedPlayers
+      .filter((p) => p.playerId !== nickname)
+      .map((p) => p.displayName || p.playerId)
+      .join(", ");
 
-    if (iAmDisconnected) {
-      showReconnectMessage("You are currently disconnected. Rejoin with the same nickname.");
-      return;
-    }
-
-    if (someoneElseDisconnected) {
-      const names = disconnectedPlayers
-        .filter((p) => p.playerId !== nickname)
-        .map((p) => p.displayName || p.playerId)
-        .join(", ");
-
-      showReconnectMessage(`Waiting for reconnection: ${names}`, 3000);
-    }
+    if (names) showReconnectMessage(`Esperando reconexión de: ${names}`, 3000);
   }, [players, nickname, screen]);
 
   const stopCalibrationFrames = () => {
@@ -384,9 +368,10 @@ export default function App() {
 
   const sendWs = (payload) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      addLog("WS no conectado.");
+      showLobbyNotice("No hay conexión con la sala.");
       return false;
     }
+
     wsRef.current.send(JSON.stringify(payload));
     return true;
   };
@@ -397,17 +382,10 @@ export default function App() {
   };
 
   const handleServerEvent = (data) => {
-    if (data.event === "connected") {
-      addLog("WS conectado.");
-      return;
-    }
+    if (data.event === "connected" || data.event === "pong") return;
 
     if (data.event === "error") {
-      addLog(`ERROR: ${data.message}`);
-      return;
-    }
-
-    if (data.event === "pong") {
+      showLobbyNotice(data.message || "Ocurrió un error.");
       return;
     }
 
@@ -415,17 +393,17 @@ export default function App() {
       setMatchState(data.data);
       setPlayers(data.data?.players || []);
 
-      const me = data.data?.players?.find((p) => p.playerId === nickname);
-      if (me?.connected && wasDisconnected && screen === "game") {
-        showReconnectMessage("Reconnected — score restored");
-        setWasDisconnected(false);
+      const currentRound = data.data?.round?.roundNumber;
+      if (blockedFrameRoundRef.current && currentRound !== blockedFrameRoundRef.current) {
+        blockedFrameRoundRef.current = null;
       }
 
       if (data.data?.round?.reason === "timeout") {
-        setRoundBanner("Round timeout");
+        setRoundBanner("Tiempo terminado");
       } else if (data.data?.round?.winnerPlayerId) {
-        setRoundBanner(`Round winner: ${data.data.round.winnerPlayerId}`);
+        setRoundBanner(`Ganó la ronda: ${data.data.round.winnerPlayerId}`);
       }
+
       return;
     }
 
@@ -433,7 +411,8 @@ export default function App() {
       setMatchState(data.data);
       setPlayers(data.data?.players || []);
       setStreak(0);
-      addLog("Partida iniciada.");
+      lastRoundProcessedRef.current = null;
+      blockedFrameRoundRef.current = null;
       return;
     }
 
@@ -444,35 +423,53 @@ export default function App() {
 
     if (data.event === "frame_result") {
       const result = data.data?.workerResult || null;
+      const match = data.data?.match || null;
+
       setLastResult(result);
 
+      if (match) {
+        setMatchState(match);
+        setPlayers(match.players || []);
+      }
+
+      const roundNumber = match?.round?.roundNumber;
+      const challenge = match?.round?.challenge;
+      const isValidInstruction = challenge?.isSimonSays === true;
+
+      if (result?.matched && roundNumber) {
+        blockedFrameRoundRef.current = roundNumber;
+      }
+
+      if (!roundNumber || lastRoundProcessedRef.current === roundNumber) {
+        return;
+      }
+
       if (result?.matched) {
+        lastRoundProcessedRef.current = roundNumber;
         triggerFlash();
-        setStreak((prev) => Math.min(prev + 1, 10));
-      } else {
+
+        if (isValidInstruction) {
+          setStreak((prev) => Math.min(prev + 1, 10));
+        } else {
+          setStreak((prev) => Math.max(prev - 2, 0));
+        }
+
+        return;
+      }
+
+      if (isValidInstruction && match?.round?.active === false) {
+        lastRoundProcessedRef.current = roundNumber;
         setStreak((prev) => Math.max(prev - 1, 0));
       }
 
-      if (data.data?.match) {
-        setMatchState(data.data.match);
-        setPlayers(data.data.match?.players || []);
-      }
       return;
-    }
-
-    if (data.event === "ignored_frame") {
-      addLog(`Frame ignorado: ${data.message}`);
-      return;
-    }
-
-    if (data.event === "left") {
-      addLog(`Evento: ${JSON.stringify(data)}`);
     }
   };
 
   const drawOverlay = () => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -504,10 +501,10 @@ export default function App() {
       playerId: nickname,
       ready: true,
     });
+
     if (ok) {
       setReadySent(true);
-      showLobbyNotice("You are ready.");
-      addLog("Ready enviado.");
+      showLobbyNotice("Estás listo.");
     }
   };
 
@@ -518,9 +515,9 @@ export default function App() {
     if (readyPlayers.length < 2) {
       if (notReadyPlayers.length > 0) {
         const names = notReadyPlayers.map((p) => p.displayName || p.playerId).join(", ");
-        showLobbyNotice(`Tell ${names} to tap Ready. You want to start the match.`);
+        showLobbyNotice(`${names}, deben ponerse listos para iniciar.`);
       } else {
-        showLobbyNotice("At least 2 ready players are needed.");
+        showLobbyNotice("Se necesitan al menos 2 jugadores listos.");
       }
       return;
     }
@@ -531,113 +528,98 @@ export default function App() {
       playerId: nickname,
     });
 
-    if (ok) {
-      showLobbyNotice("Starting match...");
-      addLog("Solicitud de inicio enviada.");
-    }
+    if (ok) showLobbyNotice("Iniciando partida...");
   };
 
   const handleCreateRoom = () => {
     const code = generateRoomCode();
     setRoomMode("create");
     setRoomId(code);
-    showLobbyNotice(`Room ${code} created.`);
+    showLobbyNotice(`Sala ${code} creada.`);
   };
 
   const handleContinueToLobby = () => {
     if (!nickname.trim()) return;
     if (!roomId.trim()) {
-      showLobbyNotice("Enter a room code first.");
+      showLobbyNotice("Ingresa un código de sala.");
       return;
     }
+
+    setJoined(false);
+    setReadySent(false);
     navigateTo("lobby");
   };
 
   const handleNickKeyDown = (e) => {
-    if (e.key === "Enter") {
-      handleContinueToLobby();
-    }
-  };
-
-  const handleLobbyKeyDown = (e) => {
-    if (e.key === "Enter") {
-      handleContinueToLobby();
-    }
+    if (e.key === "Enter") handleContinueToLobby();
   };
 
   const handleCopyRoom = async () => {
     try {
       await navigator.clipboard.writeText(currentMatchId);
       setCopiedRoom(true);
-      showLobbyNotice("Room code copied.");
+      showLobbyNotice("Código copiado.");
       setTimeout(() => setCopiedRoom(false), 1500);
-    } catch (err) {
-      console.error(err);
+    } catch {
+      showLobbyNotice("No se pudo copiar el código.");
+    }
+  };
+
+  const getPlayerGameStatus = (player) => {
+    if (!player.connected) return "Ausente";
+    if (player.lastMatched) return "En racha";
+    if ((player.score || 0) > 0) return "En partida";
+    return "Jugando";
+  };
+
+  const getMatchStatusLabel = (status) => {
+    switch (status) {
+      case "in_progress":
+        return "Partida en curso";
+      case "finished":
+        return "Partida finalizada";
+      case "round_finished":
+        return "Ronda completada";
+      case "round_timeout":
+        return "Ronda terminada";
+      case "ready":
+        return "Equipo listo";
+      case "lobby":
+        return "Esperando en sala";
+      case "waiting_players":
+        return "Esperando jugadores";
+      case "aborted":
+        return "Partida interrumpida";
+      default:
+        return "En sesión";
     }
   };
 
   const currentChallenge = matchState?.round?.challenge;
-  const currentInstruction = currentChallenge?.instruction || "Waiting for challenge...";
+  const currentInstruction = buildDisplayInstruction(currentChallenge);
   const currentInstructionKey = `${matchState?.round?.roundNumber || 0}-${currentInstruction}`;
   const currentPlayer = players.find((p) => p.playerId === nickname);
   const myScore = currentPlayer?.score || 0;
   const maxScore = Math.max(10, ...players.map((p) => p.score || 0));
   const myScorePct = Math.max(6, (myScore / maxScore) * 100);
 
-  const sortedPlayers = useMemo(() => {
-    return [...players].sort((a, b) => b.score - a.score);
-  }, [players]);
+  const sortedPlayers = useMemo(() => [...players].sort((a, b) => b.score - a.score), [players]);
 
   const allReady = players.length >= 2 && players.filter((p) => p.connected).every((p) => p.ready);
   const connectedCount = players.filter((p) => p.connected).length;
   const readyCount = players.filter((p) => p.connected && p.ready).length;
 
-
-  const getPlayerGameStatus = (player) => {
-  if (!player.connected) return "Away";
-  if (player.lastMatched) return "On fire";
-  if ((player.score || 0) > 0) return "In match";
-  return "Playing";
-};
-
-const getMatchStatusLabel = (status) => {
-  switch (status) {
-    case "in_progress":
-      return "Match in progress";
-    case "finished":
-      return "Match finished";
-    case "round_finished":
-      return "Round cleared";
-    case "round_timeout":
-      return "Round ended";
-    case "ready":
-      return "Squad ready";
-    case "lobby":
-      return "Waiting in lobby";
-    case "waiting_players":
-      return "Waiting for players";
-    case "aborted":
-      return "Match interrupted";
-    default:
-      return "In session";
-  }
-};
-
-
   if (screen === "landing") {
     return (
       <div className="landing">
-        <h1 className="title" style={{ fontSize: "90px" }}>YOLO Motion Game</h1>
-        <div className="gradient-line"></div>
-        <p className="subtitle">
-          Test your reflexes and body control in this interactive motion-based challenge.
-        </p>
-        <div className="buttons">
+        <img src={logo} alt={GAME_NAME} className="landing-logo" />
+
+        <div className="buttons landing-buttons">
           <button className="primary" onClick={() => navigateTo("nick-input")}>
-            ▶ Start Game
+            ▶ Iniciar juego
           </button>
           <button className="secondary" onClick={() => navigateTo("how-it-works")}>
-            ℹ How it works
+            ℹ ¿Cómo jugar?
           </button>
         </div>
       </div>
@@ -647,12 +629,12 @@ const getMatchStatusLabel = (status) => {
   if (screen === "nick-input") {
     return (
       <div className="landing">
-        <button className="back" onClick={() => navigateTo("landing")}>Back</button>
+        <button className="back" onClick={() => navigateTo("landing")}>Volver</button>
 
         {lobbyNotice && <div className="reconnect-banner">{lobbyNotice}</div>}
 
-        <h1 className="camera-title">Create or Join a Room</h1>
-        <p className="camera-subtitle">Choose a nickname and enter a room code to play.</p>
+        <h2 className="camera-title">Crear o unirse a una sala</h2>
+        <p className="camera-subtitle">Elige tu nombre y escribe el código de sala.</p>
 
         <div className="setup-panel room-setup-panel" style={{ width: "520px", textAlign: "center" }}>
           <div className="room-mode-switch">
@@ -660,20 +642,20 @@ const getMatchStatusLabel = (status) => {
               className={`room-mode-btn ${roomMode === "join" ? "room-mode-btn-active" : ""}`}
               onClick={() => setRoomMode("join")}
             >
-              Join Room
+              Unirse a sala
             </button>
             <button
               className={`room-mode-btn ${roomMode === "create" ? "room-mode-btn-active" : ""}`}
               onClick={handleCreateRoom}
             >
-              Create Room
+              Crear sala
             </button>
           </div>
 
           <input
             type="text"
             className="nick-input"
-            placeholder="Nickname"
+            placeholder="Tu nombre"
             value={nickname}
             onChange={(e) => setNickname(e.target.value)}
             onKeyDown={handleNickKeyDown}
@@ -684,17 +666,17 @@ const getMatchStatusLabel = (status) => {
             type="text"
             className="nick-input"
             style={{ marginTop: "14px" }}
-            placeholder="Room code"
+            placeholder="Código de sala"
             value={roomId}
             onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-            onKeyDown={handleLobbyKeyDown}
+            onKeyDown={handleNickKeyDown}
             maxLength={16}
           />
 
           <div className="room-help-text">
             {roomMode === "create"
-              ? "Share this room code with your friends."
-              : "Enter the room code you received."}
+              ? "Comparte este código con los demás jugadores."
+              : "Ingresa el código que te compartieron."}
           </div>
 
           <button
@@ -703,7 +685,7 @@ const getMatchStatusLabel = (status) => {
             disabled={!nickname.trim() || !roomId.trim()}
             onClick={handleContinueToLobby}
           >
-            Continue
+            Continuar
           </button>
         </div>
       </div>
@@ -713,52 +695,48 @@ const getMatchStatusLabel = (status) => {
   if (screen === "lobby") {
     return (
       <div className="camera-screen">
-        <h1 className="camera-title">Squad Lobby</h1>
-        <p className="camera-subtitle">Get everyone ready, then jump into the match.</p>
+        <h1 className="camera-title">Sala de jugadores</h1>
+        <p className="camera-subtitle">Todos deben estar listos para iniciar la partida.</p>
 
         {lobbyNotice && <div className="reconnect-banner">{lobbyNotice}</div>}
 
         <div className="setup-panel lobby-panel-real" style={{ width: "760px" }}>
           <div className="lobby-top-row">
             <div>
-              <div className="lobby-room-label">ROOM CODE</div>
+              <div className="lobby-room-label">CÓDIGO DE SALA</div>
               <div className="lobby-room-code">{currentMatchId}</div>
             </div>
 
             <button className="copy-room-btn" onClick={handleCopyRoom}>
-              {copiedRoom ? "Copied!" : "Copy Code"}
+              {copiedRoom ? "Copiado" : "Copiar código"}
             </button>
           </div>
 
           <div className="lobby-stats-row">
             <div className="lobby-stat-card">
               <span className="lobby-stat-number">{connectedCount}</span>
-              <span className="lobby-stat-label">Players online</span>
+              <span className="lobby-stat-label">Jugadores conectados</span>
             </div>
             <div className="lobby-stat-card">
               <span className="lobby-stat-number">{readyCount}</span>
-              <span className="lobby-stat-label">Players ready</span>
+              <span className="lobby-stat-label">Jugadores listos</span>
             </div>
             <div className="lobby-stat-card">
-              <span className="lobby-stat-number">{allReady ? "YES" : "NO"}</span>
-              <span className="lobby-stat-label">Ready to start</span>
+              <span className="lobby-stat-number">{allReady ? "SÍ" : "NO"}</span>
+              <span className="lobby-stat-label">Puede iniciar</span>
             </div>
           </div>
 
           <div className="player-list">
             {players.length === 0 ? (
               <div className="player-card-real player-card-you">
-                <div className="player-card-name">{nickname} (You)</div>
-                <div className="player-card-status">Joining room...</div>
+                <div className="player-card-name">{nickname} (Tú)</div>
+                <div className="player-card-status">Entrando a la sala...</div>
               </div>
             ) : (
               players.map((player) => {
                 const isYou = player.playerId === nickname;
-                const statusText = !player.connected
-                  ? "Offline"
-                  : player.ready
-                    ? "Ready"
-                    : "Not ready";
+                const statusText = !player.connected ? "Ausente" : player.ready ? "Listo" : "No está listo";
 
                 return (
                   <div
@@ -767,7 +745,7 @@ const getMatchStatusLabel = (status) => {
                   >
                     <div className="player-card-name">
                       {player.displayName || player.playerId}
-                      {isYou ? " (You)" : ""}
+                      {isYou ? " (Tú)" : ""}
                     </div>
                     <div className="player-card-status">{statusText}</div>
                   </div>
@@ -779,18 +757,18 @@ const getMatchStatusLabel = (status) => {
 
         <div className="action-buttons">
           <button className="btn-continue" onClick={handleReady}>
-            {readySent ? "Ready ✓" : "Tap Ready"}
+            {readySent ? "Listo ✓" : "Estoy listo"}
           </button>
 
           <button className="btn-continue" onClick={() => navigateTo("camera")}>
-            Open Camera
+            Abrir cámara
           </button>
 
           <button
             className={`btn-continue start-match-btn ${allReady ? "start-match-btn-live" : "start-match-btn-wait"}`}
             onClick={handleStartMatch}
           >
-            {allReady ? "Start Match" : "Waiting for Squad"}
+            {allReady ? "Iniciar partida" : "Esperando jugadores"}
           </button>
         </div>
       </div>
@@ -801,36 +779,43 @@ const getMatchStatusLabel = (status) => {
     return (
       <div className="camera-screen">
         <div className="top-bar" style={{ alignSelf: "flex-start" }}>
-          <button className="back" onClick={() => navigateTo("landing")}>Back</button>
+          <button className="back" onClick={() => navigateTo("landing")}>Volver</button>
         </div>
 
-        <h1 className="camera-title">How it Works</h1>
-        <p className="camera-subtitle">Follow these steps to ensure the best motion detection experience.</p>
+        <h1 className="camera-title">¿Cómo jugar?</h1>
+        <p className="camera-subtitle">Reacciona rápido, pero no caigas en las trampas.</p>
 
         <div className="setup-panel" style={{ width: "1000px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "20px" }}>
           <div className="step-card">
             <div className="step-number">01</div>
-            <h4>Calibration</h4>
-            <p>The system verifies that your body is visible before the game starts.</p>
+            <h4>Entra a una sala</h4>
+            <p>Crea una sala o únete con un código. Todos los jugadores deben marcarse como listos antes de iniciar.</p>
           </div>
           <div className="step-card">
             <div className="step-number">02</div>
-            <h4>Pose Detection</h4>
-            <p>Our AI identifies body keypoints in real-time using YOLO technology.</p>
+            <h4>Lee la instrucción</h4>
+            <p>Si la instrucción aparece sola, debes hacerla para ganar puntos. Ejemplo: “levante la mano derecha”.</p>
           </div>
           <div className="step-card">
             <div className="step-number">03</div>
-            <h4>Match & Score</h4>
-            <p>Mimic the poses or show the requested object to earn points.</p>
+            <h4>No le hagas caso a tu ex</h4>
+            <p>Si aparece “Tu ex dice: ...”, no debes hacer la acción. Si obedeces a tu ex, pierdes puntos.</p>
           </div>
         </div>
 
-        <button
-          className="primary"
-          style={{ marginTop: "40px" }}
-          onClick={() => navigateTo("nick-input")}
-        >
-          Got it, let's start!
+        <div className="setup-panel" style={{ width: "1000px", marginTop: "28px" }}>
+          <h3>Reglas principales</h3>
+          <ul className="setup-list">
+            <li>✅ Las instrucciones normales dan puntos si las haces correctamente.</li>
+            <li>⚠️ Las instrucciones que empiezan con “Tu ex dice” son trampas.</li>
+            <li>📷 El sistema detecta poses y objetos con visión computacional.</li>
+            <li>🔥 Si aciertas varias veces, tu racha aumenta.</li>
+            <li>🏆 Gana quien acumule más puntos al terminar las rondas.</li>
+          </ul>
+        </div>
+
+        <button className="primary" style={{ marginTop: "40px" }} onClick={() => navigateTo("nick-input")}>
+          Entendido, jugar
         </button>
       </div>
     );
@@ -840,11 +825,11 @@ const getMatchStatusLabel = (status) => {
     return (
       <div className="camera-screen">
         <div className="top-bar" style={{ alignSelf: "flex-start" }}>
-          <button className="back" onClick={() => navigateTo("lobby")}>Back</button>
+          <button className="back" onClick={() => navigateTo("lobby")}>Volver</button>
         </div>
 
-        <h1 className="camera-title">Position Yourself</h1>
-        <p className="camera-subtitle">Make sure your full body is visible in the frame.</p>
+        <h1 className="camera-title">Ubícate frente a la cámara</h1>
+        <p className="camera-subtitle">Asegúrate de que tu cuerpo sea visible.</p>
 
         <div className="camera-box">
           <video ref={videoRef} autoPlay playsInline className="video-feed" />
@@ -853,16 +838,16 @@ const getMatchStatusLabel = (status) => {
         {cameraStatus === "ready" && (
           <>
             <div className="setup-panel">
-              <h3>Setup Tips:</h3>
+              <h3>Consejos</h3>
               <ul className="setup-list">
-                <li>✅ Stand 6-8 feet away from the camera</li>
-                <li>✅ Ensure good lighting in the room</li>
-                <li>✅ Your entire body should be visible</li>
+                <li>✅ Mantente a una distancia adecuada de la cámara.</li>
+                <li>✅ Usa buena iluminación.</li>
+                <li>✅ Intenta que tus brazos y manos sean visibles.</li>
               </ul>
             </div>
             <div className="action-buttons">
-              <button className="btn-continue" onClick={() => navigateTo("calibration")}>Continue ✓</button>
-              <button className="btn-back-outline" onClick={() => navigateTo("lobby")}>Back</button>
+              <button className="btn-continue" onClick={() => navigateTo("calibration")}>Continuar ✓</button>
+              <button className="btn-back-outline" onClick={() => navigateTo("lobby")}>Volver</button>
             </div>
           </>
         )}
@@ -876,7 +861,7 @@ const getMatchStatusLabel = (status) => {
     return (
       <div className="camera-screen">
         <div className="top-bar" style={{ alignSelf: "flex-start" }}>
-          <button className="back" onClick={() => navigateTo("camera")}>Back</button>
+          <button className="back" onClick={() => navigateTo("camera")}>Volver</button>
         </div>
 
         <div className={`camera-box ${flashActive ? "detect-flash" : ""}`}>
@@ -885,9 +870,9 @@ const getMatchStatusLabel = (status) => {
 
           <div className="calibration-overlay">
             <div className="loader-ring"></div>
-            <h1 className="camera-title" style={{ fontSize: "48px" }}>Calibrating...</h1>
+            <h1 className="camera-title" style={{ fontSize: "48px" }}>Calibrando...</h1>
             <p style={{ fontSize: "18px", opacity: 0.8 }}>
-              Keep your body visible while we validate your position
+              Mantente visible mientras ajustamos la detección.
             </p>
 
             <div className="progress-container">
@@ -898,15 +883,15 @@ const getMatchStatusLabel = (status) => {
             </div>
 
             <div style={{ marginTop: "18px", fontSize: "18px" }}>
-              Detected: {String(calibrationInfo.detected)} | Keypoints: {calibrationInfo.keypointsVisible} | Stable: {calibrationInfo.stableFrames}
+              Detección: {calibrationInfo.detected ? "correcta" : "buscando"} | Puntos visibles: {calibrationInfo.keypointsVisible}
             </div>
 
             <div className="action-buttons" style={{ marginTop: "20px" }}>
               <button className="btn-continue" onClick={handleStartMatch} disabled={!calibrationInfo.ready}>
-                Start Match
+                Iniciar partida
               </button>
               <button className="btn-back-outline" onClick={() => navigateTo("camera")}>
-                Back
+                Volver
               </button>
             </div>
           </div>
@@ -918,8 +903,6 @@ const getMatchStatusLabel = (status) => {
   if (screen === "game") {
     return (
       <div className="camera-screen compact-game-screen">
-        <h1 className="camera-title game-screen-title">YOLO Motion Game</h1>
-
         {reconnectBanner && <div className="reconnect-banner">{reconnectBanner}</div>}
 
         <div className="game-main-layout">
@@ -931,62 +914,52 @@ const getMatchStatusLabel = (status) => {
               <div className="video-instruction-title">{currentInstruction}</div>
               <div className="video-instruction-sub">
                 {currentChallenge
-                  ? `${currentChallenge.challengeType} | target=${currentChallenge.target}`
-                  : "Waiting for challenge..."}
+                  ? currentChallenge.challengeType === "pose"
+                    ? "Reto de postura"
+                    : "Reto de objeto"
+                  : "Esperando reto..."}
               </div>
             </div>
 
             <div className="video-score-bottom">
               <div className="video-score-label">
-                {currentPlayer?.displayName || nickname} · {myScore} pts
+                {currentPlayer?.displayName || nickname} · {myScore} puntos
               </div>
               <div className="video-score-bar-bg">
-                <div
-                  className="video-score-bar-fill"
-                  style={{ width: `${myScorePct}%` }}
-                ></div>
+                <div className="video-score-bar-fill" style={{ width: `${myScorePct}%` }}></div>
               </div>
             </div>
 
-            {lastResult?.matched && <div className="detected-badge">DETECTED</div>}
+            {lastResult?.matched && <div className="detected-badge">DETECTADO</div>}
           </div>
 
           <div className="side-streak-panel">
-            <div className="streak-title">Your Streak</div>
+            <div className="streak-title">Tu racha</div>
             <div className="streak-bar-bg">
-              <div
-                className="streak-bar-fill"
-                style={{ height: `${(streak / 10) * 100}%` }}
-              ></div>
+              <div className="streak-bar-fill" style={{ height: `${(streak / 10) * 100}%` }}></div>
             </div>
-            <div className="streak-level">Lv {streak}</div>
+            <div className="streak-level">Nivel {streak}</div>
           </div>
         </div>
 
         <div className="setup-panel compact-panel game-status-panel" style={{ width: "900px" }}>
-          <h3>Match Update</h3>
+          <h3>Estado de la partida</h3>
 
           <div className="game-status-grid">
             <div className="game-status-card">
-              <span className="game-status-label">Round</span>
+              <span className="game-status-label">Ronda</span>
               <span className="game-status-value">{matchState?.round?.roundNumber || 0}</span>
             </div>
 
             <div className="game-status-card">
-              <span className="game-status-label">Match</span>
-              <span className="game-status-value">
-                {getMatchStatusLabel(matchState?.status)}
-              </span>
+              <span className="game-status-label">Partida</span>
+              <span className="game-status-value">{getMatchStatusLabel(matchState?.status)}</span>
             </div>
 
             <div className="game-status-card">
-              <span className="game-status-label">Your action</span>
+              <span className="game-status-label">Tu acción</span>
               <span className="game-status-value">
-                {lastResult
-                  ? lastResult.matched
-                    ? "Great move!"
-                    : "Keep trying"
-                  : "Waiting for move"}
+                {lastResult ? (lastResult.matched ? "¡Movimiento detectado!" : "Sigue intentando") : "Esperando movimiento"}
               </span>
             </div>
           </div>
@@ -1000,16 +973,12 @@ const getMatchStatusLabel = (status) => {
                 <div className="game-player-status-main">
                   <span className="game-player-name">
                     {player.displayName || player.playerId}
-                    {player.playerId === nickname ? " (You)" : ""}
+                    {player.playerId === nickname ? " (Tú)" : ""}
                   </span>
-                  <span className="game-player-presence">
-                    {getPlayerGameStatus(player)}
-                  </span>
+                  <span className="game-player-presence">{getPlayerGameStatus(player)}</span>
                 </div>
 
-                <div className="game-player-score-text">
-                  {player.score} pts
-                </div>
+                <div className="game-player-score-text">{player.score} pts</div>
               </div>
             ))}
           </div>
@@ -1020,9 +989,11 @@ const getMatchStatusLabel = (status) => {
         {showFinalOverlay && (
           <div className="final-overlay">
             <div className="final-card">
-              <h2>Game Over</h2>
-              <h1>{matchState?.winnerPlayerId || "No winner"}</h1>
-              <p>Final ranking</p>
+              <img src={logo} alt={GAME_NAME} className="final-logo" />
+              <h2>Partida terminada</h2>
+              <h1>{matchState?.winnerPlayerId || "Sin ganador"}</h1>
+
+              <p>Resultados de esta partida</p>
               <div className="final-ranking">
                 {sortedPlayers.map((player, index) => (
                   <div key={player.playerId} className="final-row">
@@ -1032,8 +1003,9 @@ const getMatchStatusLabel = (status) => {
                   </div>
                 ))}
               </div>
+
               <button className="btn-continue" onClick={() => navigateTo("landing")}>
-                Exit
+                Salir
               </button>
             </div>
           </div>
