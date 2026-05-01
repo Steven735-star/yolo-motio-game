@@ -18,5 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY yolo26n-pose.pt ./yolo26n-pose.pt
+COPY yolo26s.pt ./yolo26s.pt
 
 CMD sh -c "python -m app.db.init_db && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
