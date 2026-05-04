@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import logo from "./assets/logo.png";
 
-const WS_BASE = "ws://192.168.68.128:8000";
+const WS_BASE = "wss://intelligent-miracle-production-fd93.up.railway.app";
 const DEFAULT_ROOM = "SALA-001";
 const GAME_NAME = "No le hagas caso a tu ex";
 
