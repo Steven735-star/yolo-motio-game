@@ -1,0 +1,6 @@
+backend/venv/
+venv/
+__pycache__/
+*.pyc
+*.pt
+*.onnx
