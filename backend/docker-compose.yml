@@ -1,0 +1,52 @@
+services:
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: yolo_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # CORRECCIÓN: Mapeamos la carpeta local app a la carpeta /app/app del contenedor
+      - ./app:/app/app 
+      # Mapeamos los modelos a la raíz del WORKDIR (/app)
+      - ./yolo26s.pt:/app/yolo26s.pt
+      - ./yolo26n-seg.pt:/app/yolo26n-seg.pt
+      - ./yolo26n-pose.pt:/app/yolo26n-pose.pt
+    environment:
+      - YMG_DATABASE_URL=postgresql://yolo:tu_password@yolo_postgres:5432/yolo_game
+      - YOLO_CONFIG_DIR=/tmp/ultralytics
+    depends_on:
+      yolo_postgres:
+        condition: service_healthy
+    # ... resto igual
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  yolo_postgres:
+    image: postgres:15
+    container_name: yolo_postgres
+    environment:
+      POSTGRES_USER: yolo
+      POSTGRES_PASSWORD: tu_password
+      POSTGRES_DB: yolo_game
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yolo -d yolo_game"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 class ChallengeType(str, Enum):
     pose = "pose"
     object = "object"
+    motion = "motion"
 
 
 class MatchStatus(str, Enum):
@@ -105,13 +106,14 @@ class ChallengeDefinition(BaseModel):
 
 
 class PlayerState(BaseModel):
-    playerId: str
-    displayName: str | None = None
+    playerId: str  # El frontend envía 'playerId', NO 'id'
+    displayName: str | None = None # El frontend envía 'displayName', NO 'username'
     ready: bool = False
     connected: bool = True
     score: int = 0
     lastReactionSeconds: float | None = None
     lastMatched: bool = False
+    currentProgress: float = 0.0  # Campo necesario para la barra de progreso
 
 
 class RoundState(BaseModel):

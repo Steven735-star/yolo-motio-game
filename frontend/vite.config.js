@@ -6,7 +6,9 @@ export default defineConfig({
   server: {
     host: true,
     allowedHosts: [
-      'cognitive-subpanel-huddle.ngrok-free.dev'
+      'cognitive-subpanel-huddle.ngrok-free.dev',
+      'cable-keep-seduce.ngrok-free.dev',
+      'broaden-unlighted-shrubs.ngrok-free.dev'
     ]
   }
 })

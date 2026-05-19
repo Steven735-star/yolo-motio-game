@@ -231,6 +231,7 @@ input {
   background: linear-gradient(90deg, #4cc9f0, #b5179e);
   color: white;
   cursor: pointer;
+  transition: 0.25s ease;
 }
 
 .btn-continue:hover {
@@ -509,8 +510,8 @@ input {
 ========================= */
 
 .camera-box {
-  width: 950px;
-  max-width: 90%;
+  width: 640px;
+  max-width: 640px;
   aspect-ratio: 16 / 9;
   background: #0a0a20;
   border: 2px solid rgba(76, 201, 240, 0.5);
@@ -594,6 +595,9 @@ input {
 
 .compact-game-screen {
   padding-top: 20px;
+  align-items: center;
+  display: flex;
+  flex-direction: column;
 }
 
 .game-main-layout {
@@ -603,21 +607,19 @@ input {
 }
 
 .video-instruction {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  right: 12px;
   z-index: 30;
   border-radius: 14px;
-  padding: 12px 16px;
-  background: rgba(10, 10, 30, 0.62);
+  padding: 12px 20px;
+  background: rgba(10, 10, 30, 0.75);
   border: 1px solid rgba(76, 201, 240, 0.35);
   backdrop-filter: blur(8px);
   text-align: center;
+  width: 640px;
+  margin-bottom: 10px;
 }
 
 .video-instruction-title {
-  font-size: 24px;
+  font-size: 34px;
   font-weight: 800;
   color: white;
   text-shadow: 0 0 12px rgba(0,0,0,0.35);
@@ -638,20 +640,40 @@ input {
   position: absolute;
   left: 14px;
   right: 14px;
-  bottom: 14px;
+  bottom: 8px;
   z-index: 30;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: rgba(10, 10, 32, 0.62);
-  border: 1px solid rgba(76, 201, 240, 0.22);
+  padding: 6px 14px;
+  border-radius: 10px;
+  background: rgba(10, 10, 32, 0.50);
+  border: 1px solid rgba(76, 201, 240, 0.15);
   backdrop-filter: blur(6px);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
-.video-score-label {
-  font-size: 14px;
-  font-weight: 700;
-  color: #eef3ff;
-  margin-bottom: 8px;
+.video-score-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cfd8ff;
+}
+
+.video-score-number {
+  font-size: 22px;
+  font-weight: 900;
+  color: #4cc9f0;
+  text-shadow: 0 0 12px rgba(76, 201, 240, 0.6);
+  letter-spacing: 1px;
+}
+
+.animated-score {
+  animation: scorePop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes scorePop {
+  0%   { transform: scale(0.7); opacity: 0.4; }
+  60%  { transform: scale(1.25); opacity: 1; }
+  100% { transform: scale(1); }
 }
 
 .video-score-bar-bg {
@@ -735,6 +757,7 @@ input {
   background: linear-gradient(180deg, #4cc9f0, #b5179e);
   transition: height 0.3s ease;
   box-shadow: 0 0 20px rgba(76, 201, 240, 0.4);
+  will-change: height;
 }
 
 .streak-level {
@@ -981,9 +1004,6 @@ input {
     align-items: stretch;
   }
 
-  .streak-bar-fill {
-    height: 100% !important;
-  }
 }
 
 @media (max-width: 900px) {
@@ -1063,4 +1083,468 @@ input {
 
 .landing-buttons {
   margin-top: 0;
+}
+
+/* =========================================
+   ESTADOS DINÁMICOS (CONTROLADOS POR REACT)
+   ========================================= */
+
+/* 1. Botón "Estoy listo" */
+.btn-ready-toggle.not-ready {
+    background: #ff4d4d !important;
+    box-shadow: 0 0 15px rgba(255, 77, 77, 0.4);
+    color: white;
+}
+
+.btn-ready-toggle.is-ready {
+    background: #00ff88 !important;
+    box-shadow: 0 0 20px rgba(0, 255, 136, 0.5);
+    color: #12072b;
+    font-weight: 800;
+}
+
+/* 2. Botón "Iniciar Partida" */
+/* Solo se activa cuando la lógica de la sala lo permite */
+.btn-start-active {
+    background: #4cc9f0 !important;
+    box-shadow: 0 0 25px rgba(76, 201, 240, 0.8);
+    color: #12072b;
+    animation: bluePulse 1.5s infinite;
+    transform: scale(1.05);
+    font-weight: 800;
+}
+
+/* 3. Ajuste de la racha para evitar bloqueos visuales */
+.streak-bar-fill {
+    will-change: height, width;
+}
+
+/* Animación de pulso azul mejorada */
+@keyframes bluePulse {
+    0%, 100% { 
+        box-shadow: 0 0 15px rgba(76, 201, 240, 0.5);
+        transform: scale(1.05);
+    }
+    50% { 
+        box-shadow: 0 0 35px rgba(76, 201, 240, 0.9);
+        transform: scale(1.08);
+    }
+}
+
+.streak-horizontal-panel {
+  width: 640px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.streak-horizontal-panel .streak-title {
+  font-size: 13px;
+  font-weight: bold;
+  color: #cfd8ff;
+  white-space: nowrap;
+}
+
+.streak-horizontal-panel .streak-level {
+  font-size: 13px;
+  font-weight: bold;
+  color: white;
+  white-space: nowrap;
+}
+
+.streak-horizontal-panel .streak-bar-bg {
+  flex: 1;
+  height: 10px;
+  width: auto;
+  background: rgba(255,255,255,0.08);
+  border-radius: 20px;
+  display: flex;
+  align-items: flex-start;
+  overflow: hidden;
+}
+
+.streak-horizontal-panel .streak-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4cc9f0, #b5179e);
+  transition: width 0.3s ease;
+  box-shadow: 0 0 20px rgba(76, 201, 240, 0.4);
+}
+
+
+.btn-ready-active {
+  background: #4a4a6a !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+  border: 1.5px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+.btn-subtle {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.85rem;
+  cursor: pointer;
+  margin-top: 16px;
+  padding: 6px 12px;
+  transition: color 0.2s;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.btn-subtle:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* =========================
+   MOBILE ONLY ADAPTATION
+   No modifica lógica del juego
+========================= */
+
+@media (max-width: 768px), (pointer: coarse) {
+  html,
+  body,
+  #root {
+    width: 100%;
+    max-width: 100%;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+
+  body {
+    background: #12072b;
+  }
+
+  .landing,
+  .camera-screen {
+    min-height: 100dvh;
+    padding: 14px 10px;
+  }
+
+  .landing-logo {
+    width: min(70vw, 250px);
+    height: min(70vw, 250px);
+    margin-bottom: 34px;
+  }
+
+  .buttons,
+  .action-buttons {
+    width: 100%;
+    max-width: 96vw;
+    gap: 12px;
+  }
+
+  .primary,
+  .secondary,
+  .btn-continue,
+  .btn-back-outline,
+  .copy-room-btn,
+  .room-mode-btn {
+    width: 100%;
+    min-height: 48px;
+    font-size: 17px;
+    border-radius: 14px;
+    padding: 13px 18px;
+  }
+
+  .btn-subtle {
+    font-size: 0.9rem;
+  }
+
+  .camera-title {
+    font-size: clamp(30px, 9vw, 42px);
+    line-height: 1.05;
+    margin-bottom: 10px;
+  }
+
+  .camera-subtitle {
+    font-size: clamp(16px, 4.8vw, 20px);
+    line-height: 1.35;
+    margin-bottom: 22px;
+    max-width: 94vw;
+  }
+
+  .setup-panel {
+    width: 100% !important;
+    max-width: 96vw;
+    padding: 18px;
+    border-radius: 18px;
+  }
+
+  .setup-panel h3 {
+    font-size: 22px;
+  }
+
+  .setup-list li {
+    font-size: 16px;
+  }
+
+  .nick-input {
+    font-size: 18px;
+    min-height: 52px;
+  }
+
+  .room-setup-panel > div[style] {
+    flex-direction: column !important;
+  }
+
+  .back {
+    margin-bottom: 12px;
+    font-size: 13px;
+    padding: 9px 16px;
+  }
+
+  .lobby-top-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .lobby-stats-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .lobby-room-code {
+    font-size: 24px;
+    word-break: break-word;
+  }
+
+  .player-card-real {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .step-card {
+    padding: 20px;
+  }
+
+  .step-number {
+    font-size: 32px;
+  }
+
+  .step-card h4 {
+    font-size: 20px;
+  }
+
+  .step-card p {
+    font-size: 15px;
+  }
+
+  .camera-box {
+    width: min(96vw, 460px);
+    max-width: 96vw;
+    aspect-ratio: 3 / 4;
+    border-radius: 22px;
+    margin-bottom: 22px;
+  }
+
+  .video-feed {
+    object-fit: cover;
+    transform: scaleX(-1);
+  }
+
+  .overlay-canvas {
+    width: 100%;
+    height: 100%;
+  }
+
+  .calibration-overlay {
+    padding: 18px;
+  }
+
+  .loader-ring {
+    width: 58px;
+    height: 58px;
+  }
+
+  .progress-container {
+    width: 100%;
+    max-width: 82vw;
+  }
+
+  .percentage {
+    font-size: 26px;
+  }
+
+  .compact-game-screen {
+    padding: 10px 8px 16px;
+  }
+
+  .video-instruction {
+    width: min(96vw, 460px);
+    max-width: 96vw;
+    padding: 10px 12px;
+    border-radius: 16px;
+    margin-bottom: 8px;
+  }
+
+  .video-instruction-title {
+    font-size: clamp(20px, 6vw, 28px);
+    line-height: 1.15;
+  }
+
+  .video-instruction-sub {
+    font-size: 12px;
+  }
+
+  .game-main-layout {
+    width: 100%;
+    justify-content: center;
+    gap: 10px;
+  }
+
+  .compact-game-screen .camera-box {
+    width: min(96vw, 430px);
+    aspect-ratio: 3 / 4;
+    margin-bottom: 10px;
+  }
+
+  .video-score-bottom {
+    left: 10px;
+    right: 10px;
+    bottom: 8px;
+    padding: 7px 10px;
+  }
+
+  .video-score-name {
+    font-size: 12px;
+  }
+
+  .video-score-number {
+    font-size: 18px;
+  }
+
+  .detected-badge {
+    right: 12px;
+    bottom: 70px;
+    font-size: 11px;
+    padding: 8px 11px;
+  }
+
+  .streak-horizontal-panel {
+    width: min(96vw, 430px);
+    max-width: 96vw;
+    gap: 8px;
+    margin: 6px 0 10px;
+  }
+
+  .streak-horizontal-panel .streak-title,
+  .streak-horizontal-panel .streak-level {
+    font-size: 12px;
+  }
+
+  .streak-horizontal-panel .streak-bar-bg {
+    height: 9px;
+  }
+
+  .compact-panel {
+    width: 96vw !important;
+    margin-top: 10px;
+  }
+
+  .game-status-panel h2 {
+    font-size: 20px !important;
+    margin-top: 0 !important;
+  }
+
+  .game-status-panel > div:first-child {
+    flex-direction: column;
+    align-items: flex-start !important;
+    gap: 8px;
+  }
+
+  .game-status-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .game-status-card {
+    padding: 12px;
+  }
+
+  .game-status-label {
+    font-size: 12px;
+  }
+
+  .game-status-value {
+    font-size: 16px;
+  }
+
+  .game-player-status-item {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 12px;
+    gap: 8px;
+  }
+
+  .game-player-name {
+    font-size: 15px;
+  }
+
+  .game-player-presence {
+    font-size: 13px;
+  }
+
+  .game-player-score-text {
+    font-size: 16px;
+  }
+
+  .round-banner {
+    font-size: 15px;
+  }
+
+  .final-card {
+    width: 92vw;
+    padding: 22px;
+    border-radius: 22px;
+  }
+
+  .final-card h1 {
+    font-size: clamp(32px, 9vw, 46px);
+  }
+
+  .final-row {
+    grid-template-columns: 42px 1fr 64px;
+    padding: 10px 12px;
+  }
+
+  .reconnect-banner {
+    width: 96vw;
+    font-size: 14px;
+    padding: 10px 12px;
+  }
+}
+
+@media (max-width: 768px) and (orientation: landscape) {
+  .camera-screen {
+    padding: 10px;
+  }
+
+  .camera-title {
+    font-size: 28px;
+  }
+
+  .camera-subtitle {
+    font-size: 15px;
+    margin-bottom: 12px;
+  }
+
+  .camera-box,
+  .compact-game-screen .camera-box {
+    width: min(72vw, 560px);
+    aspect-ratio: 16 / 9;
+  }
+
+  .video-instruction,
+  .streak-horizontal-panel {
+    width: min(72vw, 560px);
+  }
+
+  .setup-panel,
+  .compact-panel {
+    width: 96vw !important;
+  }
 }

@@ -5,14 +5,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "YOLO Motion Game Backend"
+    app_name: str = "Motion Game Backend"
     debug: bool = True
     host: str = "0.0.0.0"
     port: int = 8000
 
     # Modelos
-    detect_model: str = Field(default="yolo26s.pt")
-    pose_model: str = Field(default="yolo26n-pose.pt")
+    detect_model: str = Field(default="yolo26s.pt")     
+    pose_model: str = Field(default="yolo26n-pose.pt")  
+    seg_model: str = Field(default="yolo26n-seg.pt")    
     object_conf: float = 0.30
     pose_conf: float = 0.30
     image_size: int = 640
@@ -25,9 +26,9 @@ class Settings(BaseSettings):
     # Sala / partida
     max_players_per_match: int = 5
     min_players_to_start: int = 2
-    max_rounds: int = 5
-    round_timeout_seconds: int = 6
-    inter_round_delay_seconds: float = 1.5
+    max_rounds: int = 8
+    round_timeout_seconds: int = 10
+    inter_round_delay_seconds: float = 3
 
     # Puntaje
     win_points: int = 10
@@ -39,6 +40,8 @@ class Settings(BaseSettings):
     pose_keypoint_conf: float = 0.30
 
     cors_origins: list[str] = ["*"]
+    
+    database_url: str = "postgresql://postgres:postgres@yolo_postgres:5432/yolo_db" 
 
     model_config = SettingsConfigDict(
         env_file=".env",

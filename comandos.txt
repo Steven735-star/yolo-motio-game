@@ -4,8 +4,12 @@ BACKEND: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 BACKEND FOR ALL: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
+docker compose up -d
+
 DB: docker exec -it yolo_postgres psql -U yolo -d yolo_game 
 
 FRONTEND FOR ALL: npm run dev -- --host 0.0.0.0
 
 Tunel: ngrok http 5173
+
+npm run build

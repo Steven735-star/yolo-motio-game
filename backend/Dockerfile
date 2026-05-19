@@ -3,22 +3,22 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Dependencias esenciales
+RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
-    libxcb1 \
-    libxext6 \
-    libsm6 \
-    libxrender1 \
     && rm -rf /var/lib/apt/lists/*
+
+# USAMOS /app para que coincida con tu estructura de paquetes
+WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
-COPY yolo26n-pose.pt ./yolo26n-pose.pt
-COPY yolo26s.pt ./yolo26s.pt
+# Copiamos el resto del código
+COPY . .
 
-CMD sh -c "python -m app.db.init_db && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+EXPOSE 8000
+
+# Usamos un pequeño delay de 2 segundos para asegurar que el socket de red esté listo
+CMD ["sh", "-c", "sleep 2 && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -1,19 +1,17 @@
-import os
-
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import sessionmaker, declarative_base
+from app.config import get_settings  # Importante para leer el .env
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://yolo:yolo@localhost:5432/yolo_game",
-)
+settings = get_settings()
+
+DATABASE_URL = settings.database_url 
 
 engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
-    bind=engine,
+    bind=engine
 )
 
 Base = declarative_base()

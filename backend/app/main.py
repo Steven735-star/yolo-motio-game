@@ -27,11 +27,20 @@ from app.services.game_service import GameCoordinator
 from app.services.metrics_service import MetricsService
 from app.services.object_worker import ObjectWorker
 from app.services.pose_worker import PoseWorker
+from app.services.motion_worker import MotionWorker
 from app.services.router_service import TaskRouter
 from app.utils.image_decode import ImageDecodeError, decode_base64_image, resize_for_inference
 
+from app.db.database import engine, Base
+from app.db import models 
+
 settings = get_settings()
+
+Base.metadata.create_all(bind=engine)
+
 app = FastAPI(title=settings.app_name, debug=settings.debug)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -44,7 +53,8 @@ manager = ConnectionManager()
 game = GameCoordinator(settings)
 pose_worker = PoseWorker(settings)
 object_worker = ObjectWorker(settings)
-router = TaskRouter(pose_worker=pose_worker, object_worker=object_worker)
+motion_worker = MotionWorker(settings)
+router = TaskRouter(pose_worker=pose_worker, object_worker=object_worker, motion_worker=motion_worker)
 metrics = MetricsService()
 
 last_frame_seen: dict[tuple[str, str], float] = {}
@@ -65,6 +75,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "detect_model": settings.detect_model,
         "pose_model": settings.pose_model,
+        "seg_model": settings.seg_model,
         "ts": time.time(),
     }
 
@@ -315,6 +326,7 @@ async def websocket_match(websocket: WebSocket, match_id: str) -> None:
                         challenge_type=ChallengeType(challenge_type),
                         frame=image,
                         target=target,
+                        player_id=msg.playerId,
                     )
 
                     _safe_save_attempt(
@@ -368,6 +380,8 @@ async def websocket_match(websocket: WebSocket, match_id: str) -> None:
                     websocket,
                     ServerEvent(event="error", ok=False, message=str(exc)),
                 )
+                # ... (todo el código anterior igual hasta la línea 265)
+
             except Exception as exc:
                 await manager.send(
                     websocket,
@@ -375,8 +389,10 @@ async def websocket_match(websocket: WebSocket, match_id: str) -> None:
                 )
 
     except (WebSocketDisconnect, RuntimeError):
+        # Este bloque captura cuando la conexión se corta (recarga o cierre)
         if current_player_id:
             snapshot = game.disconnect_player(match_id, current_player_id)
+            router.remove_player(current_player_id)
             if snapshot is not None:
                 _sync_snapshot_to_metrics(snapshot)
                 await manager.broadcast(
@@ -384,8 +400,15 @@ async def websocket_match(websocket: WebSocket, match_id: str) -> None:
                     ServerEvent(event="match_state", data=snapshot.model_dump()),
                 )
     finally:
+        # ESTA ES LA MEJORA CLAVE:
+        # Si el jugador estaba identificado, lo eliminamos de la lista de "vistos"
+        # y forzamos su desconexión en el manager de WebSockets.
+        if current_player_id:
+            _remove_seen(match_id, current_player_id)
+            game.disconnect_player(match_id, current_player_id)
+            router.remove_player(current_player_id)
+        
         await manager.disconnect(match_id, websocket)
-
 
 def _mark_seen(match_id: str, player_id: str) -> None:
     last_player_seen[(match_id, player_id)] = time.time()
@@ -433,9 +456,11 @@ def _safe_create_match(match_id: str) -> None:
         return
     try:
         metrics.create_match(match_id)
-        persisted_matches.add(match_id)
     except Exception:
         pass
+    # ✅ Se agrega al set sin importar si hubo excepción
+    # (create_match ya es idempotente, así que si falló es un error real)
+    persisted_matches.add(match_id)
 
 
 def _safe_save_player(match_id: str, player_id: str, display_name: str) -> None:
@@ -444,9 +469,9 @@ def _safe_save_player(match_id: str, player_id: str, display_name: str) -> None:
         return
     try:
         metrics.save_player(match_id, player_id, display_name)
-        persisted_players.add(key)
     except Exception:
         pass
+    persisted_players.add(key)  # ✅ Fuera del try
 
 
 def _safe_save_round_from_snapshot(snapshot: MatchSnapshot) -> None:

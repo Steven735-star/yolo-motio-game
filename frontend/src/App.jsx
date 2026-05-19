@@ -1,9 +1,56 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import logo from "./assets/logo.png";
+import CalibrationProgress from "./CalibrationProgress"; // Ajusta la ruta si es necesario
 
-const WS_BASE = "wss://intelligent-miracle-production-fd93.up.railway.app";
+const WS_BASE = "wss://broaden-unlighted-shrubs.ngrok-free.dev";
 const DEFAULT_ROOM = "SALA-001";
 const GAME_NAME = "No le hagas caso a tu ex";
+
+const MOBILE_BREAKPOINT = 768;
+
+function isMobileViewport() {
+  if (typeof window === "undefined") return false;
+
+  const hasTouch =
+    "ontouchstart" in window ||
+    navigator.maxTouchPoints > 0 ||
+    navigator.msMaxTouchPoints > 0;
+
+  return window.innerWidth <= MOBILE_BREAKPOINT || hasTouch;
+}
+
+function getCameraConstraints(isMobile) {
+  return {
+    video: {
+      facingMode: "user",
+      width: { ideal: isMobile ? 480 : 640 },
+      height: { ideal: isMobile ? 640 : 480 },
+      aspectRatio: isMobile ? { ideal: 3 / 4 } : { ideal: 4 / 3 },
+    },
+    audio: false,
+  };
+}
+
+function getFrameProfile(isMobile) {
+  return {
+    width: isMobile ? 288 : 320,
+    height: isMobile ? 384 : 240,
+    quality: isMobile ? 0.55 : 0.65,
+    calibrationIntervalMs: isMobile ? 450 : 350,
+    gameIntervalMs: isMobile ? 350 : 250,
+  };
+}
+
+
+function getDeviceId() {
+  let id = localStorage.getItem("device_id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("device_id", id);
+  }
+  return id;
+}
+
 
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -21,17 +68,17 @@ function cleanInstruction(text = "") {
 
 function buildDisplayInstruction(challenge) {
   if (!challenge) return "Esperando instrucción...";
-  const instruction = cleanInstruction(challenge.instruction || "");
-  if (challenge.isSimonSays) return instruction;
-  return `Tu ex dice: ${instruction}`;
+  return cleanInstruction(challenge.instruction || "");
 }
 
 export default function App() {
-  const [screen, setScreen] = useState(() => history.state?.screen || "landing");
+  const [screen, setScreen] = useState("landing");
   const [cameraStatus, setCameraStatus] = useState("idle");
   const [nickname, setNickname] = useState("");
+  const [deviceId] = useState(() => getDeviceId());
   const [roomId, setRoomId] = useState(DEFAULT_ROOM);
   const [roomMode, setRoomMode] = useState("join");
+  const [isMobile, setIsMobile] = useState(() => isMobileViewport());
 
   const [wsStatus, setWsStatus] = useState("disconnected");
   const [matchState, setMatchState] = useState(null);
@@ -49,10 +96,14 @@ export default function App() {
     keypoints: [],
   });
 
+
+  const [calibrationAchieved, setCalibrationAchieved] = useState(false);
   const [flashActive, setFlashActive] = useState(false);
   const [roundBanner, setRoundBanner] = useState("");
   const [showFinalOverlay, setShowFinalOverlay] = useState(false);
   const [streak, setStreak] = useState(0);
+  const [motionStatus, setMotionStatus] = useState(null);
+  const [blockedFromMatch, setBlockedFromMatch] = useState(false);
 
   const [reconnectBanner, setReconnectBanner] = useState("");
   const [wasDisconnected, setWasDisconnected] = useState(false);
@@ -90,8 +141,23 @@ export default function App() {
   useEffect(() => {
     const handlePop = (e) => setScreen(e.state?.screen || "landing");
     window.addEventListener("popstate", handlePop);
-    history.replaceState({ screen: "landing" }, "", "#landing");
     return () => window.removeEventListener("popstate", handlePop);
+  }, []);
+
+  useEffect(() => {
+    const updateDeviceMode = () => {
+      setIsMobile(isMobileViewport());
+    };
+
+    updateDeviceMode();
+
+    window.addEventListener("resize", updateDeviceMode);
+    window.addEventListener("orientationchange", updateDeviceMode);
+
+    return () => {
+      window.removeEventListener("resize", updateDeviceMode);
+      window.removeEventListener("orientationchange", updateDeviceMode);
+    };
   }, []);
 
   useEffect(() => {
@@ -102,7 +168,7 @@ export default function App() {
             JSON.stringify({
               type: "leave",
               matchId: currentMatchId,
-              playerId: nickname,
+              playerId: deviceId,
             })
           );
         }
@@ -121,10 +187,9 @@ export default function App() {
     if (["camera", "calibration", "game"].includes(screen)) {
       async function startCamera() {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 640, height: 480 },
-            audio: false,
-          });
+          const stream = await navigator.mediaDevices.getUserMedia(
+            getCameraConstraints(isMobile)
+          );
           streamRef = stream;
           if (videoRef.current) videoRef.current.srcObject = stream;
           setCameraStatus("ready");
@@ -140,18 +205,21 @@ export default function App() {
     return () => {
       if (streamRef) streamRef.getTracks().forEach((track) => track.stop());
     };
-  }, [screen]);
+  }, [screen, isMobile]);
 
   useEffect(() => {
+    const effectiveNickname = screen === "calibration" && !nickname.trim() ? "calibracion-temp" : nickname;
+    const effectiveMatchId = screen === "calibration" && !currentMatchId.trim() ? "SALA-CALIBRACION" : currentMatchId;
+
     const shouldHaveSocket =
-      nickname.trim() &&
-      currentMatchId &&
+      effectiveNickname.trim() &&
+      effectiveMatchId &&
       ["lobby", "camera", "calibration", "game"].includes(screen);
 
     if (!shouldHaveSocket) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`${WS_BASE}/ws/${currentMatchId}`);
+    const ws = new WebSocket(`${WS_BASE}/ws/${effectiveMatchId}`);
     wsRef.current = ws;
     setWsStatus("connecting");
 
@@ -190,7 +258,7 @@ export default function App() {
             JSON.stringify({
               type: "leave",
               matchId: currentMatchId,
-              playerId: nickname,
+              playerId: deviceId,
             })
           );
         }
@@ -214,6 +282,7 @@ export default function App() {
         ready: false,
         keypoints: [],
       });
+      setCalibrationAchieved(false);
       setShowFinalOverlay(false);
       setStreak(0);
       setReconnectBanner("");
@@ -225,12 +294,15 @@ export default function App() {
   }, [screen, nickname, currentMatchId]);
 
   useEffect(() => {
-    if (screen === "lobby" && wsStatus === "connected" && nickname.trim() && !joined) {
+    const joinNickname = screen === "calibration" && !nickname.trim() ? "calibracion-temp" : nickname;
+    const joinMatchId = screen === "calibration" && !currentMatchId.trim() ? "SALA-CALIBRACION" : currentMatchId;
+
+    if (["lobby", "calibration", "game"].includes(screen) && wsStatus === "connected" && joinNickname.trim() && !joined) {
       sendWs({
         type: "join",
-        matchId: currentMatchId,
-        playerId: nickname,
-        displayName: nickname,
+        matchId: joinMatchId,
+        playerId: deviceId,
+        displayName: joinNickname,
       });
       setJoined(true);
     }
@@ -243,7 +315,7 @@ export default function App() {
       sendWs({
         type: "ping",
         matchId: currentMatchId,
-        playerId: nickname,
+        playerId: deviceId,
       });
     }, 2000);
 
@@ -251,11 +323,11 @@ export default function App() {
   }, [wsStatus, nickname, screen, currentMatchId]);
 
   useEffect(() => {
-    if (matchState?.status === "in_progress") {
+    if (matchState?.status === "in_progress" && !blockedFromMatch) {
       setShowFinalOverlay(false);
       if (screen !== "game") setTimeout(() => navigateTo("game"), 250);
     }
-  }, [matchState?.status, screen]);
+  }, [matchState?.status, screen, blockedFromMatch]);
 
   useEffect(() => {
     if (matchState?.status === "finished") setShowFinalOverlay(true);
@@ -272,24 +344,27 @@ export default function App() {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
 
+    const frameProfile = getFrameProfile(isMobile);
+
     calibrationIntervalRef.current = setInterval(() => {
       if (!videoRef.current || !ctx || wsRef.current?.readyState !== WebSocket.OPEN) return;
 
-      canvas.width = 320;
-      canvas.height = 240;
+      canvas.width = frameProfile.width;
+      canvas.height = frameProfile.height;
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
+      const calMatchId = !currentMatchId.trim() ? "SALA-CALIBRACION" : currentMatchId;
       sendWs({
         type: "calibration_frame",
-        matchId: currentMatchId,
-        playerId: nickname,
-        frame: canvas.toDataURL("image/jpeg", 0.65),
+        matchId: calMatchId,
+        playerId: deviceId,
+        frame: canvas.toDataURL("image/jpeg", frameProfile.quality),
         timestamp: Date.now() / 1000,
       });
-    }, 350);
+    }, frameProfile.calibrationIntervalMs);
 
     return () => stopCalibrationFrames();
-  }, [screen, nickname, wsStatus, currentMatchId]);
+  }, [screen, nickname, wsStatus, currentMatchId, isMobile]);
 
   useEffect(() => {
     if (screen !== "game") {
@@ -302,6 +377,8 @@ export default function App() {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
 
+    const frameProfile = getFrameProfile(isMobile);
+
     frameIntervalRef.current = setInterval(() => {
       if (!videoRef.current || !ctx) return;
       if (!matchState?.round?.active || !matchState?.round?.challenge) return;
@@ -311,20 +388,20 @@ export default function App() {
 
       if (blockedFrameRoundRef.current === roundNumber) return;
 
-      canvas.width = 320;
-      canvas.height = 240;
+      canvas.width = frameProfile.width;
+      canvas.height = frameProfile.height;
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
       sendWs({
         type: "frame",
         matchId: currentMatchId,
-        playerId: nickname,
-        frame: canvas.toDataURL("image/jpeg", 0.65),
+        playerId: deviceId,
+        frame: canvas.toDataURL("image/jpeg", frameProfile.quality),
         challengeType: matchState.round.challenge.challengeType,
         target: matchState.round.challenge.target,
         timestamp: Date.now() / 1000,
       });
-    }, 250);
+    }, frameProfile.gameIntervalMs);
 
     return () => stopGameFrames();
   }, [
@@ -334,9 +411,15 @@ export default function App() {
     matchState?.round?.challenge,
     nickname,
     currentMatchId,
+    isMobile,
   ]);
 
-  useEffect(() => drawOverlay(), [calibrationInfo, lastResult, screen]);
+  useEffect(() => drawOverlay(), [calibrationInfo, lastResult, screen, isMobile]);
+  useEffect(() => {
+    if (calibrationInfo.ready && !calibrationAchieved) {
+      setCalibrationAchieved(true);
+    }
+  }, [calibrationInfo.ready]);
 
   useEffect(() => {
     if (screen !== "game") return;
@@ -345,12 +428,12 @@ export default function App() {
     if (disconnectedPlayers.length === 0) return;
 
     const names = disconnectedPlayers
-      .filter((p) => p.playerId !== nickname)
+      .filter((p) => p.playerId !== deviceId)
       .map((p) => p.displayName || p.playerId)
       .join(", ");
 
     if (names) showReconnectMessage(`Esperando reconexión de: ${names}`, 3000);
-  }, [players, nickname, screen]);
+  }, [players, deviceId, screen]);
 
   const stopCalibrationFrames = () => {
     if (calibrationIntervalRef.current) {
@@ -385,13 +468,40 @@ export default function App() {
     if (data.event === "connected" || data.event === "pong") return;
 
     if (data.event === "error") {
-      showLobbyNotice(data.message || "Ocurrió un error.");
+      const msg = data.message || "Ocurrió un error.";
+      if (msg.includes("ya inició")) {
+        setBlockedFromMatch(true);
+      } else {
+        showLobbyNotice(msg);
+      }
       return;
     }
 
     if (data.event === "match_state") {
       setMatchState(data.data);
       setPlayers(data.data?.players || []);
+
+
+      // Detectar nombre duplicado
+      const me = (data.data?.players || []).find(p => p.playerId === deviceId);
+      const duplicate = (data.data?.players || []).find(
+        p => p.displayName?.toLowerCase() === nickname.toLowerCase() && p.playerId !== deviceId
+      );
+      if (duplicate && !me && screen === "lobby") {
+        showLobbyNotice("Ya hay un jugador con ese nombre en la sala.");
+        setTimeout(() => navigateTo("landing"), 2000);
+        return;
+      }
+
+      // Sincronizar readySent con el estado real del servidor
+      if (me) setReadySent(me.ready);
+
+
+
+      // Limpiar badge si la ronda terminó o no es motion
+      if (!data.data?.round?.active || data.data?.round?.challenge?.challengeType !== "motion") {
+        setMotionStatus(null);
+      }
 
       const currentRound = data.data?.round?.roundNumber;
       if (blockedFrameRoundRef.current && currentRound !== blockedFrameRoundRef.current) {
@@ -400,8 +510,11 @@ export default function App() {
 
       if (data.data?.round?.reason === "timeout") {
         setRoundBanner("Tiempo terminado");
+        setTimeout(() => setRoundBanner(""), 3000);
       } else if (data.data?.round?.winnerPlayerId) {
-        setRoundBanner(`Ganó la ronda: ${data.data.round.winnerPlayerId}`);
+        const roundWinner = (data.data?.players || []).find(p => p.playerId === data.data.round.winnerPlayerId);
+        setRoundBanner(`Ganó la ronda: ${roundWinner?.displayName || "?"}`);
+        setTimeout(() => setRoundBanner(""), 3000);
       }
 
       return;
@@ -422,47 +535,57 @@ export default function App() {
     }
 
     if (data.event === "frame_result") {
-      const result = data.data?.workerResult || null;
-      const match = data.data?.match || null;
+        const result = data.data?.workerResult || null;
+        const match = data.data?.match || null;
+        const framePlayerId = data.data?.playerId;
 
-      setLastResult(result);
+        // Estado de partida y jugadores: se actualiza para todos
+        if (match) {
+            setMatchState(match);
+            setPlayers(match.players || []);
+        }
 
-      if (match) {
-        setMatchState(match);
-        setPlayers(match.players || []);
-      }
+        // Todo lo demás: solo si es el jugador local
+        if (framePlayerId !== deviceId) return;
 
-      const roundNumber = match?.round?.roundNumber;
-      const challenge = match?.round?.challenge;
-      const isValidInstruction = challenge?.isSimonSays === true;
+        setLastResult(result);
 
-      if (result?.matched && roundNumber) {
-        blockedFrameRoundRef.current = roundNumber;
-      }
-
-      if (!roundNumber || lastRoundProcessedRef.current === roundNumber) {
-        return;
-      }
-
-      if (result?.matched) {
-        lastRoundProcessedRef.current = roundNumber;
-        triggerFlash();
-
-        if (isValidInstruction) {
-          setStreak((prev) => Math.min(prev + 1, 10));
+        if (match?.round?.challenge?.challengeType === "motion") {
+          setMotionStatus(result?.details?.status || null);
         } else {
-          setStreak((prev) => Math.max(prev - 2, 0));
+          setMotionStatus(null);
+        }
+
+        const roundNumber = match?.round?.roundNumber;
+        const challenge = match?.round?.challenge;
+        const isValidInstruction = challenge?.isSimonSays === true;
+
+        if (result?.matched && roundNumber) {
+            blockedFrameRoundRef.current = roundNumber;
+        }
+
+        if (!roundNumber || lastRoundProcessedRef.current === roundNumber) {
+            return;
+        }
+
+        if (result?.matched) {
+            lastRoundProcessedRef.current = roundNumber;
+            triggerFlash();
+
+            if (isValidInstruction) {
+                setStreak((prev) => Math.min(prev + 1, 10));
+            } else {
+                setStreak((prev) => Math.max(prev - 2, 0));
+            }
+            return;
+        }
+
+        if (isValidInstruction && match?.round?.active === false) {
+            lastRoundProcessedRef.current = roundNumber;
+            setStreak((prev) => Math.max(prev - 1, 0));
         }
 
         return;
-      }
-
-      if (isValidInstruction && match?.round?.active === false) {
-        lastRoundProcessedRef.current = roundNumber;
-        setStreak((prev) => Math.max(prev - 1, 0));
-      }
-
-      return;
     }
   };
 
@@ -473,19 +596,35 @@ export default function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    canvas.width = 640;
-    canvas.height = 480;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+
+    const displayWidth = Math.max(1, rect.width);
+    const displayHeight = Math.max(1, rect.height);
+
+    canvas.width = Math.round(displayWidth * dpr);
+    canvas.height = Math.round(displayHeight * dpr);
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, displayWidth, displayHeight);
 
     const keypoints =
       screen === "calibration"
         ? calibrationInfo?.keypoints || []
         : lastResult?.details?.keypoints || [];
 
+    const frameProfile = getFrameProfile(isMobile);
+    const scaleX = displayWidth / frameProfile.width;
+    const scaleY = displayHeight / frameProfile.height;
+
     keypoints.forEach((kp) => {
       if ((kp.conf || 0) < 0.3) return;
+
+      const x = kp.x * scaleX;
+      const y = kp.y * scaleY;
+
       ctx.beginPath();
-      ctx.arc(kp.x * 2, kp.y * 2, 5, 0, Math.PI * 2);
+      ctx.arc(x, y, isMobile ? 4 : 5, 0, Math.PI * 2);
       ctx.fillStyle = "#4cc9f0";
       ctx.shadowBlur = 12;
       ctx.shadowColor = "#4cc9f0";
@@ -495,20 +634,29 @@ export default function App() {
   };
 
   const handleReady = () => {
-    const ok = sendWs({
-      type: "ready",
-      matchId: currentMatchId,
-      playerId: nickname,
-      ready: true,
-    });
+  const currentPlayer = players.find((p) => p.playerId === deviceId);
+  const isReady = currentPlayer?.ready ?? readySent;
+  const newReady = !isReady;
 
-    if (ok) {
-      setReadySent(true);
-      showLobbyNotice("Estás listo.");
-    }
+  const ok = sendWs({
+    type: "ready",
+    matchId: currentMatchId,
+    playerId: deviceId,
+    ready: newReady,
+  });
+
+  if (ok) {
+    setReadySent(newReady);
+    showLobbyNotice(newReady ? "Estás listo." : "Ya no estás listo.");
+   }
   };
 
   const handleStartMatch = () => {
+    if (matchState?.status === "in_progress") {
+      showLobbyNotice("La partida ya está en curso.");
+      return;
+    }
+
     const readyPlayers = players.filter((p) => p.ready && p.connected);
     const notReadyPlayers = players.filter((p) => !p.ready && p.connected);
 
@@ -525,7 +673,7 @@ export default function App() {
     const ok = sendWs({
       type: "start_match",
       matchId: currentMatchId,
-      playerId: nickname,
+      playerId: deviceId,
     });
 
     if (ok) showLobbyNotice("Iniciando partida...");
@@ -542,6 +690,14 @@ export default function App() {
     if (!nickname.trim()) return;
     if (!roomId.trim()) {
       showLobbyNotice("Ingresa un código de sala.");
+      return;
+    }
+
+    const duplicate = players.find(
+      p => p.displayName?.toLowerCase() === nickname.trim().toLowerCase() && p.playerId !== deviceId
+    );
+    if (duplicate) {
+      showLobbyNotice("Ya hay un jugador con ese nombre en esta sala.");
       return;
     }
 
@@ -565,8 +721,19 @@ export default function App() {
     }
   };
 
+  const handleReadyToggle = () => {
+  const currentPlayer = players.find((p) => p.playerId === deviceId);
+  const isReady = currentPlayer?.ready ?? false;
+  sendWs({
+    type: "ready",
+    matchId: currentMatchId,
+    playerId: deviceId,
+    ready: !isReady,
+    });
+  };
+
   const getPlayerGameStatus = (player) => {
-    if (!player.connected) return "Ausente";
+    if (!player.connected) return "Reconectando...";
     if (player.lastMatched) return "En racha";
     if ((player.score || 0) > 0) return "En partida";
     return "Jugando";
@@ -598,16 +765,17 @@ export default function App() {
   const currentChallenge = matchState?.round?.challenge;
   const currentInstruction = buildDisplayInstruction(currentChallenge);
   const currentInstructionKey = `${matchState?.round?.roundNumber || 0}-${currentInstruction}`;
-  const currentPlayer = players.find((p) => p.playerId === nickname);
+  const currentPlayer = players.find((p) => p.playerId === deviceId);
   const myScore = currentPlayer?.score || 0;
   const maxScore = Math.max(10, ...players.map((p) => p.score || 0));
   const myScorePct = Math.max(6, (myScore / maxScore) * 100);
 
   const sortedPlayers = useMemo(() => [...players].sort((a, b) => b.score - a.score), [players]);
 
-  const allReady = players.length >= 2 && players.filter((p) => p.connected).every((p) => p.ready);
-  const connectedCount = players.filter((p) => p.connected).length;
-  const readyCount = players.filter((p) => p.connected && p.ready).length;
+  const connectedPlayers = players.filter((p) => p.connected);
+  const allReady = connectedPlayers.length >= 2 && connectedPlayers.every((p) => p.ready);
+  const connectedCount = connectedPlayers.length;
+  const readyCount = connectedPlayers.filter((p) => p.ready).length;
 
   if (screen === "landing") {
     return (
@@ -619,9 +787,12 @@ export default function App() {
             ▶ Iniciar juego
           </button>
           <button className="secondary" onClick={() => navigateTo("how-it-works")}>
-            ℹ ¿Cómo jugar?
+            ¿Cómo jugar?
           </button>
         </div>
+        <button className="btn-subtle" onClick={() => navigateTo("camera")}>
+          📷 Probar cámara
+        </button>
       </div>
     );
   }
@@ -633,24 +804,13 @@ export default function App() {
 
         {lobbyNotice && <div className="reconnect-banner">{lobbyNotice}</div>}
 
-        <h2 className="camera-title">Crear o unirse a una sala</h2>
-        <p className="camera-subtitle">Elige tu nombre y escribe el código de sala.</p>
+        <h2 className="camera-title">Unirse a una sala</h2>
+        <p className="camera-subtitle">Elige tu nombre e ingresa o genera un código de sala.</p>
 
         <div className="setup-panel room-setup-panel" style={{ width: "520px", textAlign: "center" }}>
-          <div className="room-mode-switch">
-            <button
-              className={`room-mode-btn ${roomMode === "join" ? "room-mode-btn-active" : ""}`}
-              onClick={() => setRoomMode("join")}
-            >
-              Unirse a sala
-            </button>
-            <button
-              className={`room-mode-btn ${roomMode === "create" ? "room-mode-btn-active" : ""}`}
-              onClick={handleCreateRoom}
-            >
-              Crear sala
-            </button>
-          </div>
+
+
+
 
           <input
             type="text"
@@ -662,22 +822,36 @@ export default function App() {
             maxLength={15}
           />
 
-          <input
-            type="text"
-            className="nick-input"
-            style={{ marginTop: "14px" }}
-            placeholder="Código de sala"
-            value={roomId}
-            onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-            onKeyDown={handleNickKeyDown}
-            maxLength={16}
-          />
+          <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
+            <input
+              type="text"
+              className="nick-input"
+              style={{ flex: 1, margin: 0 }}
+              placeholder="Código de sala"
+              value={roomId}
+              onChange={(e) => setRoomId(e.target.value.toUpperCase())}
+              onKeyDown={handleNickKeyDown}
+              maxLength={16}
+            />
+            <button
+              className="room-mode-btn"
+              style={{ whiteSpace: "nowrap" }}
+              onClick={handleCreateRoom}
+            >
+              ↺ Generar nuevo
+            </button>
+          </div>
 
           <div className="room-help-text">
             {roomMode === "create"
-              ? "Comparte este código con los demás jugadores."
-              : "Ingresa el código que te compartieron."}
+              ? "✓ Código generado. Compártelo con los demás jugadores."
+              : "Ingresa el código que te compartieron, o genera uno nuevo."}
           </div>
+
+
+
+
+
 
           <button
             className="primary"
@@ -693,8 +867,15 @@ export default function App() {
   }
 
   if (screen === "lobby") {
+    const handleLeaveLobby = () => {
+      if (window.confirm("¿Seguro que quieres salir de la sala?")) {
+        navigateTo("nick-input");
+      }
+    };
+
     return (
       <div className="camera-screen">
+        <button className="back" onClick={handleLeaveLobby}>Volver</button>
         <h1 className="camera-title">Sala de jugadores</h1>
         <p className="camera-subtitle">Todos deben estar listos para iniciar la partida.</p>
 
@@ -734,8 +915,8 @@ export default function App() {
                 <div className="player-card-status">Entrando a la sala...</div>
               </div>
             ) : (
-              players.map((player) => {
-                const isYou = player.playerId === nickname;
+              players.filter((p) => p.connected).map((player) => {
+                const isYou = player.playerId === deviceId;
                 const statusText = !player.connected ? "Ausente" : player.ready ? "Listo" : "No está listo";
 
                 return (
@@ -756,17 +937,22 @@ export default function App() {
         </div>
 
         <div className="action-buttons">
-          <button className="btn-continue" onClick={handleReady}>
-            {readySent ? "Listo ✓" : "Estoy listo"}
+          {/* Botón de Ready con estados Rojo (not-ready) y Verde (is-ready) */}
+          <button 
+            className={`btn-continue btn-ready-toggle ${
+              (players.find((p) => p.playerId === deviceId)?.ready ?? readySent) ? "is-ready" : "not-ready"
+            }`} 
+            onClick={handleReady}
+          >
+            {(players.find((p) => p.playerId === deviceId)?.ready ?? readySent) ? "No estoy listo" : "Estoy listo"}
           </button>
 
-          <button className="btn-continue" onClick={() => navigateTo("camera")}>
-            Abrir cámara
-          </button>
 
+          {/* Botón de Iniciar Partida: Azul Neón solo cuando todos están listos */}
           <button
-            className={`btn-continue start-match-btn ${allReady ? "start-match-btn-live" : "start-match-btn-wait"}`}
+            className={`btn-continue start-match-btn ${allReady ? "btn-start-active" : "btn-start-disabled"}`}
             onClick={handleStartMatch}
+            disabled={!allReady}
           >
             {allReady ? "Iniciar partida" : "Esperando jugadores"}
           </button>
@@ -825,7 +1011,7 @@ export default function App() {
     return (
       <div className="camera-screen">
         <div className="top-bar" style={{ alignSelf: "flex-start" }}>
-          <button className="back" onClick={() => navigateTo("lobby")}>Volver</button>
+          <button className="back" onClick={() => navigateTo("landing")}>Volver</button>
         </div>
 
         <h1 className="camera-title">Ubícate frente a la cámara</h1>
@@ -847,7 +1033,7 @@ export default function App() {
             </div>
             <div className="action-buttons">
               <button className="btn-continue" onClick={() => navigateTo("calibration")}>Continuar ✓</button>
-              <button className="btn-back-outline" onClick={() => navigateTo("lobby")}>Volver</button>
+              <button className="btn-back-outline" onClick={() => navigateTo("landing")}>Volver</button>
             </div>
           </>
         )}
@@ -856,8 +1042,6 @@ export default function App() {
   }
 
   if (screen === "calibration") {
-    const pct = Math.min(100, calibrationInfo.stableFrames * 25);
-
     return (
       <div className="camera-screen">
         <div className="top-bar" style={{ alignSelf: "flex-start" }}>
@@ -868,82 +1052,120 @@ export default function App() {
           <video ref={videoRef} autoPlay playsInline className="video-feed" />
           <canvas ref={overlayCanvasRef} className="overlay-canvas" />
 
-          <div className="calibration-overlay">
-            <div className="loader-ring"></div>
-            <h1 className="camera-title" style={{ fontSize: "48px" }}>Calibrando...</h1>
-            <p style={{ fontSize: "18px", opacity: 0.8 }}>
-              Mantente visible mientras ajustamos la detección.
-            </p>
+          {/* Usamos el nuevo componente aquí */}
+          <CalibrationProgress 
+            stableFrames={calibrationInfo.stableFrames}
+            isDetected={calibrationInfo.detected}
+            keypointsVisible={calibrationInfo.keypointsVisible}
+          />
+        </div>
 
-            <div className="progress-container">
-              <div className="progress-bar-bg">
-                <div className="progress-bar-fill" style={{ width: `${pct}%` }}></div>
-              </div>
-              <div className="percentage">{pct}%</div>
-            </div>
-
-            <div style={{ marginTop: "18px", fontSize: "18px" }}>
-              Detección: {calibrationInfo.detected ? "correcta" : "buscando"} | Puntos visibles: {calibrationInfo.keypointsVisible}
-            </div>
-
-            <div className="action-buttons" style={{ marginTop: "20px" }}>
-              <button className="btn-continue" onClick={handleStartMatch} disabled={!calibrationInfo.ready}>
-                Iniciar partida
-              </button>
-              <button className="btn-back-outline" onClick={() => navigateTo("camera")}>
-                Volver
-              </button>
-            </div>
-          </div>
+        <div className="action-buttons" style={{ marginTop: "20px" }}>
+            <button 
+              className="btn-continue" 
+              onClick={() => navigateTo("nick-input")} 
+              disabled={!calibrationAchieved}
+            >
+              Jugar
+            </button>
+            <button className="btn-back-outline" onClick={() => navigateTo("camera")}>
+              Volver
+            </button>
         </div>
       </div>
     );
-  }
+}
 
   if (screen === "game") {
     return (
       <div className="camera-screen compact-game-screen">
-        {reconnectBanner && <div className="reconnect-banner">{reconnectBanner}</div>}
+        {reconnectBanner && (
+          <div style={{
+            position: "fixed",
+            bottom: "24px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(30, 20, 60, 0.95)",
+            color: "#fff",
+            padding: "10px 28px",
+            borderRadius: "24px",
+            fontSize: "0.95rem",
+            fontWeight: "bold",
+            zIndex: 9999,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+          }}>
+            {reconnectBanner}
+          </div>
+        )}
+
+        <div key={currentInstructionKey} className="video-instruction animated-instruction">
+          <div className="video-instruction-title">{currentInstruction}</div>
+          <div className="video-instruction-sub">
+            {currentChallenge
+              ? currentChallenge.challengeType === "pose"
+              ? "Reto de postura"
+              : currentChallenge.challengeType === "motion"
+              ? "Reto de movimiento"
+              : "Reto de objeto"
+              : "Esperando reto..."}
+          </div>
+        </div>
 
         <div className="game-main-layout">
           <div className={`camera-box ${flashActive ? "detect-flash detect-wave" : ""}`}>
             <video ref={videoRef} autoPlay playsInline className="video-feed" />
             <canvas ref={overlayCanvasRef} className="overlay-canvas" />
 
-            <div key={currentInstructionKey} className="video-instruction animated-instruction">
-              <div className="video-instruction-title">{currentInstruction}</div>
-              <div className="video-instruction-sub">
-                {currentChallenge
-                  ? currentChallenge.challengeType === "pose"
-                    ? "Reto de postura"
-                    : "Reto de objeto"
-                  : "Esperando reto..."}
-              </div>
-            </div>
-
             <div className="video-score-bottom">
-              <div className="video-score-label">
-                {currentPlayer?.displayName || nickname} · {myScore} puntos
-              </div>
-              <div className="video-score-bar-bg">
-                <div className="video-score-bar-fill" style={{ width: `${myScorePct}%` }}></div>
-              </div>
+              <span className="video-score-name">{currentPlayer?.displayName || nickname}</span>
+              <span key={myScore} className="video-score-number animated-score">
+                {myScore > 0 ? `+${myScore}` : myScore} pts
+              </span>
             </div>
 
             {lastResult?.matched && <div className="detected-badge">DETECTADO</div>}
           </div>
 
-          <div className="side-streak-panel">
-            <div className="streak-title">Tu racha</div>
-            <div className="streak-bar-bg">
-              <div className="streak-bar-fill" style={{ height: `${(streak / 10) * 100}%` }}></div>
-            </div>
-            <div className="streak-level">Nivel {streak}</div>
-          </div>
         </div>
 
-        <div className="setup-panel compact-panel game-status-panel" style={{ width: "900px" }}>
-          <h3>Estado de la partida</h3>
+        <div className="streak-horizontal-panel">
+          <span className="streak-title">Tu racha</span>
+          <div className="streak-bar-bg">
+            <div className="streak-bar-fill" style={{ width: `${(streak / 10) * 100}%` }}></div>
+          </div>
+          <span className="streak-level">Nivel {streak}</span>
+        </div>
+
+        <div className="setup-panel compact-panel game-status-panel" style={{ width: "640px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h2 style={{ color: "#1cccf3", marginBottom: "12px", marginTop: "-20px" }}>
+              Estado de la partida
+            </h2>
+            {motionStatus && (
+              <div style={{
+                background: motionStatus === "STABLE"
+                  ? "rgba(0,200,80,0.92)"
+                  : motionStatus === "NO_PERSON"
+                  ? "rgba(220,150,0,0.92)"
+                  : "rgba(220,30,30,0.92)",
+                color: "#fff",
+                fontWeight: "bold",
+                fontSize: "0.95rem",
+                padding: "5px 16px",
+                borderRadius: "20px",
+                letterSpacing: "1px",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+              }}>
+                {motionStatus === "STABLE"
+                  ? "🟢 QUIETO"
+                  : motionStatus === "NO_PERSON"
+                  ? "🟡 SIN PERSONA"
+                  : "🔴 MOVIMIENTO"}
+              </div>
+            )}
+          </div>
 
           <div className="game-status-grid">
             <div className="game-status-card">
@@ -965,15 +1187,15 @@ export default function App() {
           </div>
 
           <div className="game-player-status-list">
-            {players.map((player) => (
+            {players.filter((p) => p.connected).map((player) => (
               <div
                 key={player.playerId}
-                className={`game-player-status-item ${player.playerId === nickname ? "game-player-status-you" : ""} ${!player.connected ? "game-player-status-away" : ""}`}
+                className={`game-player-status-item ${player.playerId === deviceId ? "game-player-status-you" : ""} ${!player.connected ? "game-player-status-away" : ""}`}
               >
                 <div className="game-player-status-main">
                   <span className="game-player-name">
                     {player.displayName || player.playerId}
-                    {player.playerId === nickname ? " (Tú)" : ""}
+                    {player.playerId === deviceId  ? " (Tú)" : ""}
                   </span>
                   <span className="game-player-presence">{getPlayerGameStatus(player)}</span>
                 </div>
@@ -991,7 +1213,10 @@ export default function App() {
             <div className="final-card">
               <img src={logo} alt={GAME_NAME} className="final-logo" />
               <h2>Partida terminada</h2>
-              <h1>{matchState?.winnerPlayerId || "Sin ganador"}</h1>
+              <h1>
+                {players.find(p => p.playerId === matchState?.winnerPlayerId)?.displayName
+                  || "Sin ganador"}
+              </h1>
 
               <p>Resultados de esta partida</p>
               <div className="final-ranking">
@@ -1010,6 +1235,24 @@ export default function App() {
             </div>
           </div>
         )}
+      </div>
+    );
+  }
+
+  if (blockedFromMatch) {
+    return (
+      <div className="landing">
+        <img src={logo} alt={GAME_NAME} className="landing-logo" />
+        <h2 style={{ color: "#fff", marginBottom: "12px" }}>Partida en curso</h2>
+        <p style={{ color: "#ccc", marginBottom: "28px", textAlign: "center", maxWidth: "340px" }}>
+          La partida ya inició. No puedes unirte en este momento.
+        </p>
+        <button className="primary" onClick={() => {
+          setBlockedFromMatch(false);
+          navigateTo("landing");
+        }}>
+          Volver al inicio
+        </button>
       </div>
     );
   }
